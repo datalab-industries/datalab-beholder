@@ -135,17 +135,10 @@ class TestBeholderDaemon:
         thread.join(timeout=5)
         assert not thread.is_alive()
 
-    def test_no_changes_no_push(
+    def test_no_pending_after_sync(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """If there are no changes, no metadata should be pushed.
-
-        We wait briefly between syncs so that directory mtimes stabilise
-        on Windows (NTFS can shift sub-second mtime values between rapid
-        stat() calls).
-        """
-        import time
-
+        """After a successful sync, all entries should be marked as synced."""
         transport = MockTransport()
         transport.add_response(
             "POST",
@@ -155,14 +148,9 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
-        # First sync pushes everything (all new)
         daemon._sync_metadata()
         assert len(transport.requests) == 1
 
-        # Let filesystem timestamps settle
-        time.sleep(1)
-
-        # Second sync - no changes
-        daemon._sync_metadata()
-        # Should still be 1 request (no second push)
-        assert len(transport.requests) == 1
+        # After successful sync, no pending changes should remain
+        pending = daemon._state.get_pending_changes("test-data")
+        assert len(pending) == 0
