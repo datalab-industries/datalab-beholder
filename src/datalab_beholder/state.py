@@ -169,6 +169,50 @@ class StateStore:
         self._conn.commit()
         return diff
 
+    def upsert_entries(
+        self, watched_path_name: str, entries: list[FileEntry]
+    ) -> None:
+        """Insert or update individual file entries without deletion detection.
+
+        Used by the watcher for incremental updates — only touches the entries
+        provided, leaving all other rows untouched.
+        """
+        for entry in entries:
+            existing = self._conn.execute(
+                "SELECT size, modified FROM files "
+                "WHERE path = ? AND watched_path_name = ?",
+                (entry.path, watched_path_name),
+            ).fetchone()
+
+            if existing is None:
+                self._conn.execute(
+                    "INSERT INTO files (path, watched_path_name, size, modified, status) "
+                    "VALUES (?, ?, ?, ?, 'new')",
+                    (entry.path, watched_path_name, entry.size, entry.modified),
+                )
+            elif existing["size"] != entry.size or existing["modified"] != entry.modified:
+                self._conn.execute(
+                    "UPDATE files SET size = ?, modified = ?, status = 'modified' "
+                    "WHERE path = ? AND watched_path_name = ?",
+                    (entry.size, entry.modified, entry.path, watched_path_name),
+                )
+        self._conn.commit()
+
+    def mark_entries_deleted(
+        self, watched_path_name: str, paths: list[str]
+    ) -> None:
+        """Mark specific file entries as deleted.
+
+        Used by the watcher when it receives delete events.
+        """
+        for path in paths:
+            self._conn.execute(
+                "UPDATE files SET status = 'deleted' "
+                "WHERE path = ? AND watched_path_name = ? AND status != 'deleted'",
+                (path, watched_path_name),
+            )
+        self._conn.commit()
+
     def mark_synced(self, watched_path_name: str, paths: list[str]) -> None:
         """Mark files as successfully synced to the server.
 

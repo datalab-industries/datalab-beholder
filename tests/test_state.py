@@ -148,6 +148,95 @@ class TestStateStore:
         assert "file1.csv" in b_paths
         store.close()
 
+    def test_upsert_entries_new(self, tmp_path: Path) -> None:
+        """upsert_entries inserts new rows without deletion detection."""
+        from datalab_beholder.scanner import FileEntry
+
+        store = StateStore(tmp_path / "test.db")
+        entries = [
+            FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
+            FileEntry(path="b.csv", size=200, modified=2000.0, is_directory=False),
+        ]
+        store.upsert_entries("wp", entries)
+
+        pending = store.get_pending_changes("wp")
+        assert {e.path for e in pending} == {"a.csv", "b.csv"}
+        assert all(e.status == "new" for e in pending)
+        store.close()
+
+    def test_upsert_entries_updates_modified(self, tmp_path: Path) -> None:
+        """upsert_entries marks changed entries as modified."""
+        from datalab_beholder.scanner import FileEntry
+
+        store = StateStore(tmp_path / "test.db")
+        store.upsert_entries("wp", [
+            FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
+        ])
+        # Upsert same path with new size
+        store.upsert_entries("wp", [
+            FileEntry(path="a.csv", size=999, modified=1000.0, is_directory=False),
+        ])
+
+        pending = store.get_pending_changes("wp")
+        assert len(pending) == 1
+        assert pending[0].status == "modified"
+        assert pending[0].size == 999
+        store.close()
+
+    def test_upsert_entries_no_false_deletions(self, tmp_path: Path, tmp_tree: Path) -> None:
+        """upsert_entries should not mark missing entries as deleted."""
+        from datalab_beholder.scanner import FileEntry
+
+        store = StateStore(tmp_path / "test.db")
+        result = scan_directory(tmp_tree, name="test")
+        store.update_from_scan(result)
+
+        # Upsert only one new file — existing entries must stay untouched
+        store.upsert_entries("test", [
+            FileEntry(path="brand_new.csv", size=10, modified=99.0, is_directory=False),
+        ])
+
+        pending = store.get_pending_changes("test")
+        # The original files should still be pending (status=new from initial scan)
+        # plus the new file — no deletions
+        paths = {e.path for e in pending}
+        assert "brand_new.csv" in paths
+        assert "file1.csv" in paths
+        assert all(e.status in ("new",) for e in pending)
+        store.close()
+
+    def test_mark_entries_deleted(self, tmp_path: Path, tmp_tree: Path) -> None:
+        """mark_entries_deleted marks specific entries as deleted."""
+        store = StateStore(tmp_path / "test.db")
+        result = scan_directory(tmp_tree, name="test")
+        store.update_from_scan(result)
+
+        store.mark_entries_deleted("test", ["file1.csv", "notes.txt"])
+
+        pending = store.get_pending_changes("test")
+        statuses = {e.path: e.status for e in pending}
+        assert statuses["file1.csv"] == "deleted"
+        assert statuses["notes.txt"] == "deleted"
+        # Other files still new
+        assert statuses.get("file2.raw") == "new"
+        store.close()
+
+    def test_mark_entries_deleted_idempotent(self, tmp_path: Path) -> None:
+        """Marking an already-deleted entry as deleted is a no-op."""
+        from datalab_beholder.scanner import FileEntry
+
+        store = StateStore(tmp_path / "test.db")
+        store.upsert_entries("wp", [
+            FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
+        ])
+        store.mark_entries_deleted("wp", ["a.csv"])
+        store.mark_entries_deleted("wp", ["a.csv"])  # again
+
+        pending = store.get_pending_changes("wp")
+        assert len(pending) == 1
+        assert pending[0].status == "deleted"
+        store.close()
+
     def test_remove_deleted(self, tmp_path: Path, tmp_tree: Path) -> None:
         store = StateStore(tmp_path / "test.db")
         result = scan_directory(tmp_tree, name="test")

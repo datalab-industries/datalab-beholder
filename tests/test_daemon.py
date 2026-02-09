@@ -36,6 +36,7 @@ class TestBeholderDaemon:
         daemon._client = _make_beholder_client(mock_transport, monkeypatch)
         daemon._daemon_id = daemon._build_daemon_id()
         daemon._threads = []
+        daemon._watcher = None
         return daemon
 
     def test_daemon_creates(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
@@ -44,8 +45,8 @@ class TestBeholderDaemon:
         daemon = self._make_daemon(config, transport, monkeypatch)
         assert daemon._daemon_id == "test-data"
 
-    def test_initial_sync(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
-        """Daemon should perform an initial metadata sync on start."""
+    def test_initial_scan(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
+        """Initial scan should perform a full scan and push metadata."""
         transport = MockTransport()
         transport.add_response(
             "POST",
@@ -55,14 +56,13 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
-        # Run just the sync (not the full daemon loop)
-        daemon._sync_metadata()
+        daemon._initial_scan()
 
         # Should have made a metadata push
         assert len(transport.requests) == 1
 
-    def test_sync_handles_missing_path(self, tmp_path: Path, monkeypatch) -> None:
-        """Daemon should handle watched paths that don't exist."""
+    def test_initial_scan_handles_missing_path(self, tmp_path: Path, monkeypatch) -> None:
+        """Initial scan should handle watched paths that don't exist."""
         config = BeholderConfig(
             datalab={"url": "https://test.example.org", "api_key": "test-key"},
             watched_paths=[
@@ -77,7 +77,57 @@ class TestBeholderDaemon:
         daemon = self._make_daemon(config, transport, monkeypatch)
 
         # Should not raise
-        daemon._sync_metadata()
+        daemon._initial_scan()
+
+    def test_push_pending_changes(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Push loop should send accumulated state changes to the server."""
+        transport = MockTransport()
+        transport.add_response(
+            "POST",
+            "/api/remote-files/metadata",
+            json_data={"status": "success"},
+        )
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        # Seed state via initial scan (consumes one push request)
+        daemon._initial_scan()
+        transport.requests.clear()
+
+        # Simulate watcher adding a new entry
+        from datalab_beholder.scanner import FileEntry
+
+        daemon._state.upsert_entries("test-data", [
+            FileEntry(path="watcher_new.csv", size=42, modified=9999.0, is_directory=False),
+        ])
+
+        daemon._push_pending_changes()
+
+        # Should have pushed the new watcher entry
+        assert len(transport.requests) == 1
+
+    def test_push_pending_no_changes(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Push loop should skip push when there are no pending changes."""
+        transport = MockTransport()
+        transport.add_response(
+            "POST",
+            "/api/remote-files/metadata",
+            json_data={"status": "success"},
+        )
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        # Seed + sync (initial scan pushes and marks synced)
+        daemon._initial_scan()
+        transport.requests.clear()
+
+        # Push loop should find nothing pending
+        daemon._push_pending_changes()
+        assert len(transport.requests) == 0
 
     def test_file_request_handling(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
@@ -135,10 +185,10 @@ class TestBeholderDaemon:
         thread.join(timeout=5)
         assert not thread.is_alive()
 
-    def test_no_pending_after_sync(
+    def test_no_pending_after_initial_scan(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """After a successful sync, all entries should be marked as synced."""
+        """After a successful initial scan, all entries should be marked as synced."""
         transport = MockTransport()
         transport.add_response(
             "POST",
@@ -148,7 +198,7 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
-        daemon._sync_metadata()
+        daemon._initial_scan()
         assert len(transport.requests) == 1
 
         # After successful sync, no pending changes should remain

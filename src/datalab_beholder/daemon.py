@@ -13,16 +13,19 @@ from datalab_beholder.client import BeholderClient
 from datalab_beholder.config import BeholderConfig
 from datalab_beholder.scanner import scan_directory
 from datalab_beholder.state import StateStore
+from datalab_beholder.watcher import DirectoryWatcher
 
 log = logging.getLogger(__name__)
 
 
 class BeholderDaemon:
-    """Daemon that periodically syncs file metadata and uploads requested files.
+    """Daemon that watches directories and syncs file metadata to datalab.
 
-    Runs two loops on separate threads:
-    1. Metadata sync: scans watched paths and pushes changes to the server.
-    2. File request poll: checks for and fulfills file transfer requests.
+    Architecture:
+    1. Startup: full scan seeds local state, pushes initial snapshot to server.
+    2. Watcher: detects file changes in real-time, updates local state.
+    3. Push loop: periodically sends accumulated changes to server.
+    4. File request loop: polls server for requested files, uploads them.
     """
 
     def __init__(self, config: BeholderConfig):
@@ -39,6 +42,7 @@ class BeholderDaemon:
         )
         self._daemon_id = self._build_daemon_id()
         self._threads: list[threading.Thread] = []
+        self._watcher: DirectoryWatcher | None = None
 
     def _build_daemon_id(self) -> str:
         """Build a daemon ID from watched path names."""
@@ -66,14 +70,26 @@ class BeholderDaemon:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(sig, self._handle_signal)
 
-        # Run initial metadata sync immediately
-        self._sync_metadata()
+        # 1. Initial full scan + push
+        self._initial_scan()
 
-        # Start background threads
-        metadata_thread = threading.Thread(
+        # 2. Start filesystem watcher
+        self._watcher = DirectoryWatcher(self._state)
+        for wp in self._config.watched_paths:
+            if wp.path.exists():
+                self._watcher.watch(
+                    path=wp.path,
+                    name=wp.name,
+                    include_patterns=wp.include_patterns,
+                    exclude_patterns=wp.exclude_patterns,
+                )
+        self._watcher.start()
+
+        # 3. Start periodic background loops
+        push_thread = threading.Thread(
             target=self._loop,
-            args=(self._sync_metadata, self._config.sync.metadata_interval),
-            name="metadata-sync",
+            args=(self._push_pending_changes, self._config.sync.metadata_interval),
+            name="metadata-push",
             daemon=True,
         )
         file_request_thread = threading.Thread(
@@ -83,13 +99,16 @@ class BeholderDaemon:
             daemon=True,
         )
 
-        self._threads = [metadata_thread, file_request_thread]
+        self._threads = [push_thread, file_request_thread]
         for t in self._threads:
             t.start()
 
         # Block main thread until stop signal
         log.info("Daemon running. Press Ctrl+C to stop.")
         self._stop_event.wait()
+
+        if self._watcher is not None:
+            self._watcher.stop()
         log.info("Daemon stopped.")
 
     def stop(self) -> None:
@@ -112,16 +131,16 @@ class BeholderDaemon:
             except Exception:
                 log.exception("Error in %s loop", func.__name__)
 
-    def _sync_metadata(self) -> None:
-        """Scan all watched paths and push metadata changes to the server."""
+    def _initial_scan(self) -> None:
+        """Run a full scan of all watched paths and push the initial snapshot."""
         for wp in self._config.watched_paths:
             try:
-                self._sync_one_path(wp)
+                self._scan_and_push(wp)
             except Exception:
-                log.exception("Error syncing metadata for %s", wp.name)
+                log.exception("Error during initial scan of %s", wp.name)
 
-    def _sync_one_path(self, wp: Any) -> None:
-        """Scan a single watched path and sync changes."""
+    def _scan_and_push(self, wp: Any) -> None:
+        """Scan a single watched path and push changes to the server."""
         if not wp.path.exists():
             log.warning("Watched path does not exist: %s", wp.path)
             return
@@ -147,15 +166,53 @@ class BeholderDaemon:
             log.debug("No changes for %s", wp.name)
             return
 
-        log.info(
-            "Changes for %s: %d new, %d modified, %d deleted",
-            wp.name,
-            len(diff.new),
-            len(diff.modified),
-            len(diff.deleted),
-        )
+        self._push_diff(wp.name, diff)
 
-        # Push to server
+    def _push_pending_changes(self) -> None:
+        """Read accumulated changes from state and push to the server."""
+        for wp in self._config.watched_paths:
+            try:
+                pending = self._state.get_pending_changes(wp.name)
+                if not pending:
+                    log.debug("No pending changes for %s", wp.name)
+                    continue
+
+                log.info("Pushing %d pending entries for %s", len(pending), wp.name)
+                entries = [
+                    {
+                        "path": e.path,
+                        "size": e.size,
+                        "modified": e.modified,
+                        "is_directory": e.is_directory,
+                        "status": e.status,
+                    }
+                    for e in pending
+                ]
+
+                success = self._client.push_metadata(
+                    daemon_id=self._daemon_id,
+                    entries=entries,
+                    snapshot_type="diff",
+                )
+
+                self._state.log_sync(
+                    watched_path_name=wp.name,
+                    snapshot_type="diff",
+                    entries_sent=len(entries),
+                    success=success,
+                )
+
+                if success:
+                    self._state.mark_synced(wp.name, [e.path for e in pending])
+                    self._state.remove_deleted(wp.name)
+                    log.info("Pushed %d entries for %s", len(entries), wp.name)
+                else:
+                    log.warning("Failed to push changes for %s, will retry", wp.name)
+            except Exception:
+                log.exception("Error pushing changes for %s", wp.name)
+
+    def _push_diff(self, watched_path_name: str, diff: Any) -> None:
+        """Push a diff result to the server."""
         entries = [
             {
                 "path": e.path,
@@ -167,6 +224,14 @@ class BeholderDaemon:
             for e in diff.all_changes
         ]
 
+        log.info(
+            "Changes for %s: %d new, %d modified, %d deleted",
+            watched_path_name,
+            len(diff.new),
+            len(diff.modified),
+            len(diff.deleted),
+        )
+
         success = self._client.push_metadata(
             daemon_id=self._daemon_id,
             entries=entries,
@@ -174,7 +239,7 @@ class BeholderDaemon:
         )
 
         self._state.log_sync(
-            watched_path_name=wp.name,
+            watched_path_name=watched_path_name,
             snapshot_type=diff.snapshot_type,
             entries_sent=len(entries),
             success=success,
@@ -182,11 +247,11 @@ class BeholderDaemon:
 
         if success:
             synced_paths = [e.path for e in diff.all_changes]
-            self._state.mark_synced(wp.name, synced_paths)
-            self._state.remove_deleted(wp.name)
-            log.info("Synced %d entries for %s", len(entries), wp.name)
+            self._state.mark_synced(watched_path_name, synced_paths)
+            self._state.remove_deleted(watched_path_name)
+            log.info("Synced %d entries for %s", len(entries), watched_path_name)
         else:
-            log.warning("Failed to sync metadata for %s, will retry", wp.name)
+            log.warning("Failed to sync metadata for %s, will retry", watched_path_name)
 
     def _poll_file_requests(self) -> None:
         """Check for pending file requests and upload them."""

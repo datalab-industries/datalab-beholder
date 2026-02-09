@@ -108,7 +108,7 @@ class BeholderEventHandler(FileSystemEventHandler):
             self._timer.start()
 
     def _flush(self) -> None:
-        """Process all pending events by re-scanning affected paths."""
+        """Process all pending events and update state incrementally."""
         with self._lock:
             events = dict(self._pending_events)
             self._pending_events.clear()
@@ -123,21 +123,20 @@ class BeholderEventHandler(FileSystemEventHandler):
             self._watched_path_name,
         )
 
-        # Re-stat each affected path and update state
-        from datalab_beholder.scanner import FileEntry, ScanResult
-        from datetime import datetime, timezone
+        from datalab_beholder.scanner import FileEntry
 
-        entries: list[FileEntry] = []
+        upserts: list[FileEntry] = []
+        deletes: list[str] = []
+
         for rel_path, event in events.items():
             abs_path = self._root / rel_path
             if isinstance(event, (FileDeletedEvent, DirDeletedEvent)):
-                # Deleted entries are handled by the next full scan diff
-                log.debug("Deleted: %s", rel_path)
+                deletes.append(rel_path)
                 continue
 
             try:
                 stat = abs_path.stat()
-                entries.append(
+                upserts.append(
                     FileEntry(
                         path=rel_path,
                         size=stat.st_size if abs_path.is_file() else 0,
@@ -148,27 +147,17 @@ class BeholderEventHandler(FileSystemEventHandler):
             except OSError as e:
                 log.debug("Cannot stat %s during flush: %s", abs_path, e)
 
-        if entries:
-            # Create a partial scan result to update state
-            partial = ScanResult(
-                root_path=str(self._root),
-                name=self._watched_path_name,
-                timestamp=datetime.now(timezone.utc),
-                entries=entries,
-                total_files=sum(1 for e in entries if not e.is_directory),
-                total_directories=sum(1 for e in entries if e.is_directory),
-                total_size=sum(e.size for e in entries),
-            )
-            # Note: this is a partial update - won't detect deletions.
-            # Full periodic scans handle deletion detection.
-            diff = self._state.update_from_scan(partial)
-            if diff.has_changes:
-                log.info(
-                    "Watcher update for %s: %d new, %d modified",
-                    self._watched_path_name,
-                    len(diff.new),
-                    len(diff.modified),
-                )
+        if upserts:
+            self._state.upsert_entries(self._watched_path_name, upserts)
+        if deletes:
+            self._state.mark_entries_deleted(self._watched_path_name, deletes)
+
+        log.info(
+            "Watcher update for %s: %d upserted, %d deleted",
+            self._watched_path_name,
+            len(upserts),
+            len(deletes),
+        )
 
 
 class DirectoryWatcher:
