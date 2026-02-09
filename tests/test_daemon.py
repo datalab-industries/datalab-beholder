@@ -138,7 +138,14 @@ class TestBeholderDaemon:
     def test_no_changes_no_push(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """If there are no changes, no metadata should be pushed."""
+        """If there are no changes, no metadata should be pushed.
+
+        We wait briefly between syncs so that directory mtimes stabilise
+        on Windows (NTFS can shift sub-second mtime values between rapid
+        stat() calls).
+        """
+        import time
+
         transport = MockTransport()
         transport.add_response(
             "POST",
@@ -151,6 +158,9 @@ class TestBeholderDaemon:
         # First sync pushes everything (all new)
         daemon._sync_metadata()
         assert len(transport.requests) == 1
+
+        # Let filesystem timestamps settle
+        time.sleep(1)
 
         # Second sync - no changes
         daemon._sync_metadata()

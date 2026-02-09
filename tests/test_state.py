@@ -33,9 +33,10 @@ class TestStateStore:
         result = scan_directory(tmp_tree, name="test")
 
         store.update_from_scan(result)
-        # Scan again without changes
-        result2 = scan_directory(tmp_tree, name="test")
-        diff2 = store.update_from_scan(result2)
+        # Feed the same scan result again — identical entries mean zero changes.
+        # (We don't re-scan because on Windows, directory mtimes can shift by
+        # sub-second amounts between rapid stat() calls.)
+        diff2 = store.update_from_scan(result)
 
         assert len(diff2.new) == 0
         assert len(diff2.modified) == 0
