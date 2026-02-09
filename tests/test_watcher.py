@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from unittest.mock import patch
 
 from watchdog.events import (
     DirCreatedEvent,
@@ -39,7 +40,7 @@ class TestBeholderEventHandler:
         handler = self._make_handler(data, state)
 
         handler.on_created(FileCreatedEvent(str(data / "new.csv")))
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         assert {e.path for e in pending} == {"new.csv"}
@@ -65,7 +66,7 @@ class TestBeholderEventHandler:
         f.write_text("modified content that is longer")
         handler = self._make_handler(data, state)
         handler.on_modified(FileModifiedEvent(str(f)))
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         entry = next(e for e in pending if e.path == "existing.csv")
@@ -86,7 +87,7 @@ class TestBeholderEventHandler:
 
         handler = self._make_handler(data, state)
         handler.on_deleted(FileDeletedEvent(str(data / "gone.csv")))
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         entry = next(e for e in pending if e.path == "gone.csv")
@@ -108,7 +109,7 @@ class TestBeholderEventHandler:
         )
 
         handler.on_created(FileCreatedEvent(str(data / "file.tmp")))
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         assert len(pending) == 0
@@ -131,7 +132,7 @@ class TestBeholderEventHandler:
 
         handler.on_created(FileCreatedEvent(str(data / "file.csv")))
         handler.on_created(FileCreatedEvent(str(data / "file.txt")))
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         assert {e.path for e in pending} == {"file.csv"}
@@ -147,7 +148,7 @@ class TestBeholderEventHandler:
         state = StateStore(tmp_path / "test.db")
         handler = self._make_handler(data, state)
 
-        # Simulate rapid create → modify → modify
+        # Simulate rapid create -> modify -> modify
         handler._enqueue(FileCreatedEvent(str(f)))
         handler._enqueue(FileModifiedEvent(str(f)))
         handler._enqueue(FileModifiedEvent(str(f)))
@@ -155,13 +156,75 @@ class TestBeholderEventHandler:
         # Only one entry should be pending for this path
         assert len(handler._pending_events) == 1
 
-        # Cancel the debounce timer and flush manually
-        if handler._timer:
-            handler._timer.cancel()
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         assert len(pending) == 1
+        state.close()
+
+    def test_flush_if_ready_respects_debounce(self, tmp_path: Path) -> None:
+        """flush_if_ready should not flush if debounce window hasn't elapsed."""
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "a.csv").write_text("aaa")
+
+        state = StateStore(tmp_path / "test.db")
+        handler = self._make_handler(data, state)
+
+        handler._enqueue(FileCreatedEvent(str(data / "a.csv")))
+
+        # Immediately calling flush_if_ready — debounce hasn't elapsed
+        handler.flush_if_ready()
+
+        pending = state.get_pending_changes("test")
+        assert len(pending) == 0  # not flushed yet
+        assert len(handler._pending_events) == 1  # still queued
+        state.close()
+
+    def test_flush_if_ready_after_debounce(self, tmp_path: Path, monkeypatch) -> None:
+        """flush_if_ready should flush once debounce window elapses."""
+        import datalab_beholder.watcher as watcher_mod
+
+        monkeypatch.setattr(watcher_mod, "DEBOUNCE_SECONDS", 0.05)
+
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "a.csv").write_text("aaa")
+
+        state = StateStore(tmp_path / "test.db")
+        handler = self._make_handler(data, state)
+
+        handler._enqueue(FileCreatedEvent(str(data / "a.csv")))
+        time.sleep(0.1)
+
+        handler.flush_if_ready()
+
+        pending = state.get_pending_changes("test")
+        assert {e.path for e in pending} == {"a.csv"}
+        state.close()
+
+    def test_max_flush_interval(self, tmp_path: Path, monkeypatch) -> None:
+        """Max-wait should force flush even if debounce keeps resetting."""
+        import datalab_beholder.watcher as watcher_mod
+
+        monkeypatch.setattr(watcher_mod, "MAX_FLUSH_INTERVAL", 0.05)
+        monkeypatch.setattr(watcher_mod, "DEBOUNCE_SECONDS", 60.0)  # won't trigger
+
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "a.csv").write_text("aaa")
+
+        state = StateStore(tmp_path / "test.db")
+        handler = self._make_handler(data, state)
+
+        handler._enqueue(FileCreatedEvent(str(data / "a.csv")))
+        time.sleep(0.1)
+
+        # Debounce is 60s so it wouldn't trigger, but max-wait has elapsed
+        handler.flush_if_ready()
+
+        pending = state.get_pending_changes("test")
+        assert {e.path for e in pending} == {"a.csv"}
         state.close()
 
     def test_dir_created_event(self, tmp_path: Path) -> None:
@@ -174,7 +237,7 @@ class TestBeholderEventHandler:
         handler = self._make_handler(data, state)
 
         handler.on_created(DirCreatedEvent(str(data / "subdir")))
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         assert len(pending) == 1
@@ -194,7 +257,7 @@ class TestBeholderEventHandler:
         handler.on_created(FileCreatedEvent(str(f)))
         # Delete before flush
         f.unlink()
-        handler._flush()
+        handler.flush()
 
         pending = state.get_pending_changes("test")
         assert len(pending) == 0
@@ -216,4 +279,28 @@ class TestDirectoryWatcher:
         time.sleep(0.1)
 
         watcher.stop()
+        state.close()
+
+    def test_flush_if_ready_delegates(self, tmp_path: Path, monkeypatch) -> None:
+        """DirectoryWatcher.flush_if_ready should check all handlers."""
+        import datalab_beholder.watcher as watcher_mod
+
+        monkeypatch.setattr(watcher_mod, "DEBOUNCE_SECONDS", 0.05)
+
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "file.csv").write_text("data")
+
+        state = StateStore(tmp_path / "test.db")
+        watcher = DirectoryWatcher(state)
+        watcher.watch(data, name="test")
+
+        # Enqueue an event directly on the handler
+        watcher._handlers[0]._enqueue(FileCreatedEvent(str(data / "file.csv")))
+        time.sleep(0.1)
+
+        watcher.flush_if_ready()
+
+        pending = state.get_pending_changes("test")
+        assert {e.path for e in pending} == {"file.csv"}
         state.close()

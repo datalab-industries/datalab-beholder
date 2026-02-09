@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,20 +18,27 @@ from datalab_beholder.watcher import DirectoryWatcher
 
 log = logging.getLogger(__name__)
 
+TICK_SECONDS = 1.0
+
 
 class BeholderDaemon:
     """Daemon that watches directories and syncs file metadata to datalab.
 
-    Architecture:
-    1. Startup: full scan seeds local state, pushes initial snapshot to server.
-    2. Watcher: detects file changes in real-time, updates local state.
-    3. Push loop: periodically sends accumulated changes to server.
-    4. File request loop: polls server for requested files, uploads them.
+    Runs a single-threaded tick loop on the main thread. The only
+    background thread is the watchdog Observer (internal to the library),
+    which enqueues events into a lock-protected dict. All state-store
+    and network I/O happens on the main thread, avoiding cross-thread
+    SQLite access and making the code safe for free-threaded Python.
+
+    Tick loop responsibilities (checked every ~1 s):
+    1. Flush watcher events whose debounce/max-wait window has elapsed.
+    2. Push accumulated state changes when ``metadata_interval`` elapses.
+    3. Poll server for file requests when ``file_request_poll`` elapses.
     """
 
     def __init__(self, config: BeholderConfig):
         self._config = config
-        self._stop_event = threading.Event()
+        self._running = False
         self._state = StateStore(config.state_db)
 
         # BaseDatalabClient reads the API key from env vars
@@ -41,7 +49,6 @@ class BeholderDaemon:
             log_level=config.log_level,
         )
         self._daemon_id = self._build_daemon_id()
-        self._threads: list[threading.Thread] = []
         self._watcher: DirectoryWatcher | None = None
 
     def _build_daemon_id(self) -> str:
@@ -50,7 +57,7 @@ class BeholderDaemon:
         return "-".join(names).lower().replace(" ", "-")
 
     def start(self) -> None:
-        """Start the daemon loops and block until shutdown."""
+        """Start the daemon and block until ``stop()`` is called."""
         log.info("Starting beholder daemon (id=%s)", self._daemon_id)
         log.info(
             "Watching %d path(s): %s",
@@ -64,9 +71,7 @@ class BeholderDaemon:
         )
 
         # Register signal handlers for graceful shutdown (only works in main thread)
-        import threading as _threading
-
-        if _threading.current_thread() is _threading.main_thread():
+        if threading.current_thread() is threading.main_thread():
             for sig in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(sig, self._handle_signal)
 
@@ -85,51 +90,50 @@ class BeholderDaemon:
                 )
         self._watcher.start()
 
-        # 3. Start periodic background loops
-        push_thread = threading.Thread(
-            target=self._loop,
-            args=(self._push_pending_changes, self._config.sync.metadata_interval),
-            name="metadata-push",
-            daemon=True,
-        )
-        file_request_thread = threading.Thread(
-            target=self._loop,
-            args=(self._poll_file_requests, self._config.sync.file_request_poll),
-            name="file-request-poll",
-            daemon=True,
-        )
+        # 3. Run the tick loop
+        self._running = True
+        last_push = time.monotonic()
+        last_poll = time.monotonic()
 
-        self._threads = [push_thread, file_request_thread]
-        for t in self._threads:
-            t.start()
-
-        # Block main thread until stop signal
         log.info("Daemon running. Press Ctrl+C to stop.")
-        self._stop_event.wait()
+        try:
+            while self._running:
+                time.sleep(TICK_SECONDS)
 
-        if self._watcher is not None:
-            self._watcher.stop()
-        log.info("Daemon stopped.")
+                # Flush watcher events if debounce/max-wait elapsed
+                if self._watcher is not None:
+                    self._watcher.flush_if_ready()
+
+                now = time.monotonic()
+
+                # Push accumulated changes
+                if now - last_push >= self._config.sync.metadata_interval:
+                    try:
+                        self._push_pending_changes()
+                    except Exception:
+                        log.exception("Error in push loop")
+                    last_push = now
+
+                # Poll for file requests
+                if now - last_poll >= self._config.sync.file_request_poll:
+                    try:
+                        self._poll_file_requests()
+                    except Exception:
+                        log.exception("Error in file-request poll loop")
+                    last_poll = now
+        finally:
+            if self._watcher is not None:
+                self._watcher.stop()
+            log.info("Daemon stopped.")
 
     def stop(self) -> None:
         """Signal the daemon to stop."""
         log.info("Stopping daemon...")
-        self._stop_event.set()
+        self._running = False
 
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("Received signal %d, shutting down...", signum)
         self.stop()
-
-    def _loop(self, func: callable, interval: float) -> None:
-        """Run a function periodically until stop is signaled."""
-        while not self._stop_event.is_set():
-            self._stop_event.wait(interval)
-            if self._stop_event.is_set():
-                break
-            try:
-                func()
-            except Exception:
-                log.exception("Error in %s loop", func.__name__)
 
     def _initial_scan(self) -> None:
         """Run a full scan of all watched paths and push the initial snapshot."""

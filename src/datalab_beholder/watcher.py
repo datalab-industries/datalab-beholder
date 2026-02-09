@@ -6,6 +6,7 @@ import fnmatch
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,13 +29,18 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 DEBOUNCE_SECONDS = 5.0
+MAX_FLUSH_INTERVAL = 600.0  # Force flush after 10 minutes even if events keep arriving
 
 
 class BeholderEventHandler(FileSystemEventHandler):
     """Handles filesystem events with filtering and debouncing.
 
-    Events are collected into batches and flushed to the state store
-    after a debounce window to avoid thrashing during bulk operations.
+    Events are collected into a pending dict by the watchdog Observer thread.
+    The main daemon loop calls ``flush_if_ready()`` on each tick to drain
+    events once the debounce window or max-wait ceiling has elapsed.
+
+    No Timer threads are used — all state-store writes happen on the
+    caller's thread.
     """
 
     def __init__(
@@ -54,7 +60,8 @@ class BeholderEventHandler(FileSystemEventHandler):
 
         self._pending_events: dict[str, FileSystemEvent] = {}
         self._lock = threading.Lock()
-        self._timer: threading.Timer | None = None
+        self._last_event_time: float = 0.0
+        self._batch_start_time: float = 0.0
 
     def _matches_filters(self, path: str) -> bool:
         """Check if a path passes include/exclude filters."""
@@ -97,26 +104,45 @@ class BeholderEventHandler(FileSystemEventHandler):
             self._enqueue(create_cls(event.dest_path))
 
     def _enqueue(self, event: FileSystemEvent) -> None:
-        """Add an event to the pending batch and reset the debounce timer."""
+        """Add an event to the pending batch (called from the Observer thread)."""
         rel = self._rel_path(event.src_path)
+        now = time.monotonic()
         with self._lock:
+            if not self._pending_events:
+                self._batch_start_time = now
             self._pending_events[rel] = event
-            if self._timer is not None:
-                self._timer.cancel()
-            self._timer = threading.Timer(DEBOUNCE_SECONDS, self._flush)
-            self._timer.daemon = True
-            self._timer.start()
+            self._last_event_time = now
 
-    def _flush(self) -> None:
-        """Process all pending events and update state incrementally."""
+    def flush_if_ready(self) -> None:
+        """Flush pending events if the debounce or max-wait window has elapsed.
+
+        Call this from the main loop. Only touches the state store when
+        there is actually work to do.
+        """
+        with self._lock:
+            if not self._pending_events:
+                return
+            now = time.monotonic()
+            debounce_ok = (now - self._last_event_time) >= DEBOUNCE_SECONDS
+            max_wait_ok = (now - self._batch_start_time) >= MAX_FLUSH_INTERVAL
+            if not (debounce_ok or max_wait_ok):
+                return
+            events = dict(self._pending_events)
+            self._pending_events.clear()
+
+        self._process_events(events)
+
+    def flush(self) -> None:
+        """Unconditionally flush all pending events."""
         with self._lock:
             events = dict(self._pending_events)
             self._pending_events.clear()
-            self._timer = None
 
-        if not events:
-            return
+        if events:
+            self._process_events(events)
 
+    def _process_events(self, events: dict[str, FileSystemEvent]) -> None:
+        """Re-stat paths and update the state store."""
         log.info(
             "Processing %d batched filesystem events for %s",
             len(events),
@@ -194,13 +220,24 @@ class DirectoryWatcher:
         self._observer.schedule(handler, str(path), recursive=True)
         log.info("Watching directory: %s (%s)", name, path)
 
+    def flush_if_ready(self) -> None:
+        """Check each handler and flush events whose window has elapsed."""
+        for handler in self._handlers:
+            handler.flush_if_ready()
+
+    def flush(self) -> None:
+        """Unconditionally flush all handlers."""
+        for handler in self._handlers:
+            handler.flush()
+
     def start(self) -> None:
         """Start the filesystem observer."""
         self._observer.start()
         log.info("Filesystem watcher started")
 
     def stop(self) -> None:
-        """Stop the filesystem observer."""
+        """Stop the filesystem observer and flush remaining events."""
         self._observer.stop()
         self._observer.join(timeout=5)
+        self.flush()
         log.info("Filesystem watcher stopped")

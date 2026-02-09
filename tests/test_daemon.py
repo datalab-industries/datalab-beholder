@@ -28,14 +28,13 @@ class TestBeholderDaemon:
         """Create a daemon with a mocked client."""
         daemon = BeholderDaemon.__new__(BeholderDaemon)
         daemon._config = config
-        daemon._stop_event = threading.Event()
+        daemon._running = False
 
         from datalab_beholder.state import StateStore
 
         daemon._state = StateStore(config.state_db)
         daemon._client = _make_beholder_client(mock_transport, monkeypatch)
         daemon._daemon_id = daemon._build_daemon_id()
-        daemon._threads = []
         daemon._watcher = None
         return daemon
 
