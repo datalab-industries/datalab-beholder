@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: uv run pytest -v
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: datalab-beholder-linux
+          - os: windows-latest
+            artifact: datalab-beholder-windows
+          - os: macos-latest
+            artifact: datalab-beholder-macos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build with PyInstaller
+        run: uv run pyinstaller beholder.spec
+
+      - name: Verify binary runs
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ./dist/datalab-beholder.exe --version
+            ./dist/datalab-beholder.exe scan src --pretty | head -20
+          else
+            ./dist/datalab-beholder --version
+            ./dist/datalab-beholder scan src --pretty | head -20
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/datalab-beholder*
+
+  release:
+    name: Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release files
+        run: |
+          mkdir release
+          cp artifacts/datalab-beholder-linux/datalab-beholder release/datalab-beholder-linux-amd64
+          cp artifacts/datalab-beholder-macos/datalab-beholder release/datalab-beholder-macos-amd64
+          cp artifacts/datalab-beholder-windows/datalab-beholder.exe release/datalab-beholder-windows-amd64.exe
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release upload "$TAG" release/* --clobber
