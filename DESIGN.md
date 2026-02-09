@@ -1,3 +1,8 @@
+# Initial Design Notes
+
+> This document captures the original design thinking and motivation for the beholder project.
+> For usage instructions, see [README.md](README.md).
+
 # datalab-plugin-beholder
 
 Filesystem watcher daemon for datalab instances.
