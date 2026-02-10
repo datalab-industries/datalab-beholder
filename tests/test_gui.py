@@ -1,8 +1,8 @@
 """Tests for the GUI module.
 
 These tests verify that the GUI classes can be instantiated and destroyed
-without error. They require a display (real or virtual) — if unavailable
-they are skipped.
+without error. They require tkinter and a working Tcl/Tk installation —
+skipped otherwise.
 """
 
 from __future__ import annotations
@@ -11,20 +11,8 @@ from pathlib import Path
 
 import pytest
 
-# Skip entire module if tkinter is missing or no display is available
-HAS_DISPLAY = False
-try:
-    import tkinter as tk
-
-    _root = tk.Tk()
-    _root.destroy()
-    HAS_DISPLAY = True
-except ImportError:
-    pass
-except Exception:
-    pass
-
-pytestmark = pytest.mark.skipif(not HAS_DISPLAY, reason="tkinter unavailable or no display")
+# Skip entire module when tkinter is not installed (Ubuntu CI, some Mac builds)
+tk = pytest.importorskip("tkinter")
 
 
 @pytest.fixture
@@ -76,7 +64,10 @@ class TestBeholderGUI:
 
         from datalab_beholder.gui import BeholderGUI
 
-        app = BeholderGUI(config_file)
-        # Verify window exists
+        try:
+            app = BeholderGUI(config_file)
+        except tk.TclError as exc:
+            pytest.skip(f"Tcl/Tk not usable: {exc}")
+
         assert app.winfo_exists()
         app.destroy()
