@@ -7,22 +7,24 @@ they are skipped.
 
 from __future__ import annotations
 
-import tkinter as tk
 from pathlib import Path
 
 import pytest
 
-from datalab_beholder.config import BeholderConfig
-
-# Skip entire module if no display is available
+# Skip entire module if tkinter is missing or no display is available
+HAS_DISPLAY = False
 try:
+    import tkinter as tk
+
     _root = tk.Tk()
     _root.destroy()
     HAS_DISPLAY = True
-except tk.TclError:
-    HAS_DISPLAY = False
+except ImportError:
+    pass
+except Exception:
+    pass
 
-pytestmark = pytest.mark.skipif(not HAS_DISPLAY, reason="No display available")
+pytestmark = pytest.mark.skipif(not HAS_DISPLAY, reason="tkinter unavailable or no display")
 
 
 @pytest.fixture
