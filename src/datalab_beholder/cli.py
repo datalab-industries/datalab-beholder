@@ -131,7 +131,15 @@ def start(config_path: Path | None, log_level: str | None) -> None:
 )
 def gui(config_path: Path | None, log_level: str | None) -> None:
     """Launch the beholder GUI."""
-    from datalab_beholder.gui import BeholderGUI
+    try:
+        from datalab_beholder.gui import BeholderGUI
+    except ImportError:
+        raise click.ClickException(
+            "tkinter is required for the GUI but is not installed.\n"
+            "  Ubuntu/Debian: sudo apt install python3-tk\n"
+            "  Fedora:        sudo dnf install python3-tkinter\n"
+            "  macOS:         brew install python-tk"
+        )
 
     if log_level:
         logging.basicConfig(
