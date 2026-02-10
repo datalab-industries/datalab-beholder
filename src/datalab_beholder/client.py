@@ -45,6 +45,27 @@ class BeholderClient(BaseDatalabClient):
 
     # Instance-level backoff state (shadowed from class attribute on first mutation)
     _backoff: float = INITIAL_BACKOFF
+    last_request_ok: bool = False
+
+    def check_connection(self) -> tuple[bool, bool]:
+        """Check server reachability and authentication.
+
+        Performs a lightweight GET to ``/info``. If it succeeds the server
+        is reachable; if the response includes valid data the API key is
+        accepted.
+
+        Returns:
+            ``(reachable, authenticated)`` booleans.
+        """
+        try:
+            info = self.get_info()
+            reachable = True
+            authenticated = bool(info)
+        except Exception:
+            reachable = False
+            authenticated = False
+        self.last_request_ok = reachable
+        return reachable, authenticated
 
     def get_info(self) -> dict[str, Any]:
         info_url = f"{self.datalab_api_url}/info"
@@ -86,10 +107,12 @@ class BeholderClient(BaseDatalabClient):
         try:
             result = super()._request(method, url, expected_status, **kwargs)
             self._reset_backoff()
+            self.last_request_ok = True
             return result
         except DatalabAPIError as e:
             wait = self._increase_backoff()
             log.error("Request failed for %s %s: %s (backing off %.1fs)", method, url, e, wait)
+            self.last_request_ok = False
             return None
 
     def push_metadata(

@@ -123,6 +123,39 @@ def start(config_path: Path | None, log_level: str | None) -> None:
     default=None,
     help="Path to config file. Default: ~/.datalab-beholder/config.yaml",
 )
+@click.option(
+    "--log-level",
+    type=click.Choice(["debug", "info", "warning", "error"], case_sensitive=False),
+    default=None,
+    help="Override log level from config.",
+)
+def gui(config_path: Path | None, log_level: str | None) -> None:
+    """Launch the beholder GUI."""
+    from datalab_beholder.gui import BeholderGUI
+
+    if log_level:
+        logging.basicConfig(
+            level=log_level.upper(),
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        )
+    else:
+        logging.basicConfig(
+            level="INFO",
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        )
+
+    app = BeholderGUI(config_path)
+    app.mainloop()
+
+
+@main.command()
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to config file. Default: ~/.datalab-beholder/config.yaml",
+)
 def status(config_path: Path | None) -> None:
     """Show daemon state and sync history."""
     from datalab_beholder.config import load_config

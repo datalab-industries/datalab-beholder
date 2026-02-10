@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
 
 from datalab_beholder.config import BeholderConfig
@@ -36,6 +37,13 @@ class TestBeholderDaemon:
         daemon._client = _make_beholder_client(mock_transport, monkeypatch)
         daemon._daemon_id = daemon._build_daemon_id()
         daemon._watcher = None
+
+        # New status attributes added by the tick/setup refactor
+        daemon.last_scan_time = None
+        daemon.last_push_time = None
+        daemon.pending_count = 0
+        daemon.sync_status = "idle"
+
         return daemon
 
     def test_daemon_creates(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
@@ -203,3 +211,116 @@ class TestBeholderDaemon:
         # After successful sync, no pending changes should remain
         pending = daemon._state.get_pending_changes("test-data")
         assert len(pending) == 0
+
+    def test_setup_runs_initial_scan_and_starts_watcher(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """setup() should scan, start the watcher, and set last_scan_time."""
+        transport = MockTransport()
+        transport.add_response(
+            "POST",
+            "/api/remote-files/metadata",
+            json_data={"status": "success"},
+        )
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        daemon.setup()
+
+        assert daemon.last_scan_time is not None
+        assert daemon._watcher is not None
+        assert daemon._running is True
+        assert len(transport.requests) == 1
+
+        # Clean up the watcher
+        daemon.shutdown()
+
+    def test_tick_can_be_called_independently(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """tick() should execute one loop iteration without errors."""
+        transport = MockTransport()
+        transport.add_response(
+            "POST",
+            "/api/remote-files/metadata",
+            json_data={"status": "success"},
+        )
+        transport.add_response(
+            "GET",
+            "/api/remote-files/pending",
+            json_data={"requests": []},
+        )
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        daemon.setup()
+        transport.requests.clear()
+
+        # Calling tick should not raise
+        daemon.tick()
+
+        assert daemon.pending_count == 0
+        assert daemon.sync_status == "idle"
+
+        daemon.shutdown()
+
+    def test_tick_pushes_when_interval_elapsed(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """tick() should push changes when the metadata interval has elapsed."""
+        transport = MockTransport()
+        transport.add_response(
+            "POST",
+            "/api/remote-files/metadata",
+            json_data={"status": "success"},
+        )
+        transport.add_response(
+            "GET",
+            "/api/remote-files/pending",
+            json_data={"requests": []},
+        )
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        daemon.setup()
+        transport.requests.clear()
+
+        # Add a pending entry
+        from datalab_beholder.scanner import FileEntry
+
+        daemon._state.upsert_entries("test-data", [
+            FileEntry(path="new.csv", size=10, modified=9999.0, is_directory=False),
+        ])
+
+        # Force the push interval to have elapsed
+        daemon._last_push_mono = time.monotonic() - config.sync.metadata_interval - 1
+
+        daemon.tick()
+
+        # Should have pushed
+        push_requests = [
+            r for r in transport.requests if r.method == "POST"
+        ]
+        assert len(push_requests) >= 1
+        assert daemon.last_push_time is not None
+
+        daemon.shutdown()
+
+    def test_status_properties_after_setup(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """After setup, config and client should be accessible."""
+        transport = MockTransport()
+        transport.add_response(
+            "POST",
+            "/api/remote-files/metadata",
+            json_data={"status": "success"},
+        )
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        assert daemon.config is config
+        assert daemon.client is daemon._client
+
+        daemon.setup()
+        daemon.shutdown()

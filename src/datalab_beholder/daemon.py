@@ -34,6 +34,9 @@ class BeholderDaemon:
     1. Flush watcher events whose debounce/max-wait window has elapsed.
     2. Push accumulated state changes when ``metadata_interval`` elapses.
     3. Poll server for file requests when ``file_request_poll`` elapses.
+
+    The loop body is extracted into :meth:`tick` so that both the CLI
+    (``start()``) and the GUI (``root.after``) can drive the same logic.
     """
 
     def __init__(self, config: BeholderConfig):
@@ -51,13 +54,33 @@ class BeholderDaemon:
         self._daemon_id = self._build_daemon_id()
         self._watcher: DirectoryWatcher | None = None
 
+        # Observable status for the GUI
+        self.last_scan_time: float | None = None
+        self.last_push_time: float | None = None
+        self.pending_count: int = 0
+        self.sync_status: str = "idle"  # "idle" | "pushing" | "error"
+
+    @property
+    def config(self) -> BeholderConfig:
+        """The daemon's configuration."""
+        return self._config
+
+    @property
+    def client(self) -> BeholderClient:
+        """The daemon's HTTP client."""
+        return self._client
+
     def _build_daemon_id(self) -> str:
         """Build a daemon ID from watched path names."""
         names = sorted(wp.name for wp in self._config.watched_paths)
         return "-".join(names).lower().replace(" ", "-")
 
-    def start(self) -> None:
-        """Start the daemon and block until ``stop()`` is called."""
+    def setup(self) -> None:
+        """Run initial scan, start the filesystem watcher, and prepare timers.
+
+        Call this once before the first :meth:`tick`. ``start()`` calls it
+        automatically for the CLI path.
+        """
         log.info("Starting beholder daemon (id=%s)", self._daemon_id)
         log.info(
             "Watching %d path(s): %s",
@@ -77,6 +100,7 @@ class BeholderDaemon:
 
         # 1. Initial full scan + push
         self._initial_scan()
+        self.last_scan_time = time.time()
 
         # 2. Start filesystem watcher
         self._watcher = DirectoryWatcher(self._state)
@@ -90,41 +114,66 @@ class BeholderDaemon:
                 )
         self._watcher.start()
 
-        # 3. Run the tick loop
+        # 3. Initialise monotonic timers for interval checks
+        self._last_push_mono = time.monotonic()
+        self._last_poll_mono = time.monotonic()
         self._running = True
-        last_push = time.monotonic()
-        last_poll = time.monotonic()
+
+        # Update pending count after initial scan
+        self._update_pending_count()
+
+    def tick(self) -> None:
+        """One iteration of the main loop.
+
+        Flushes watcher events, pushes changes when the metadata interval
+        elapses, and polls for file requests when the poll interval elapses.
+        Safe to call from ``root.after()`` in Tkinter.
+        """
+        # Flush watcher events if debounce/max-wait elapsed
+        if self._watcher is not None:
+            self._watcher.flush_if_ready()
+
+        now = time.monotonic()
+
+        # Push accumulated changes
+        if now - self._last_push_mono >= self._config.sync.metadata_interval:
+            self.sync_status = "pushing"
+            try:
+                self._push_pending_changes()
+                self.last_push_time = time.time()
+                self.sync_status = "idle"
+            except Exception:
+                log.exception("Error in push loop")
+                self.sync_status = "error"
+            self._last_push_mono = now
+
+        # Poll for file requests
+        if now - self._last_poll_mono >= self._config.sync.file_request_poll:
+            try:
+                self._poll_file_requests()
+            except Exception:
+                log.exception("Error in file-request poll loop")
+            self._last_poll_mono = now
+
+        self._update_pending_count()
+
+    def start(self) -> None:
+        """CLI entry: setup + tick loop. Blocks until ``stop()`` is called."""
+        self.setup()
 
         log.info("Daemon running. Press Ctrl+C to stop.")
         try:
             while self._running:
                 time.sleep(TICK_SECONDS)
-
-                # Flush watcher events if debounce/max-wait elapsed
-                if self._watcher is not None:
-                    self._watcher.flush_if_ready()
-
-                now = time.monotonic()
-
-                # Push accumulated changes
-                if now - last_push >= self._config.sync.metadata_interval:
-                    try:
-                        self._push_pending_changes()
-                    except Exception:
-                        log.exception("Error in push loop")
-                    last_push = now
-
-                # Poll for file requests
-                if now - last_poll >= self._config.sync.file_request_poll:
-                    try:
-                        self._poll_file_requests()
-                    except Exception:
-                        log.exception("Error in file-request poll loop")
-                    last_poll = now
+                self.tick()
         finally:
-            if self._watcher is not None:
-                self._watcher.stop()
-            log.info("Daemon stopped.")
+            self.shutdown()
+
+    def shutdown(self) -> None:
+        """Stop the watcher and clean up resources."""
+        if self._watcher is not None:
+            self._watcher.stop()
+        log.info("Daemon stopped.")
 
     def stop(self) -> None:
         """Signal the daemon to stop."""
@@ -134,6 +183,13 @@ class BeholderDaemon:
     def _handle_signal(self, signum: int, frame: Any) -> None:
         log.info("Received signal %d, shutting down...", signum)
         self.stop()
+
+    def _update_pending_count(self) -> None:
+        """Refresh the pending-change counter from the state store."""
+        total = 0
+        for wp in self._config.watched_paths:
+            total += len(self._state.get_pending_changes(wp.name))
+        self.pending_count = total
 
     def _initial_scan(self) -> None:
         """Run a full scan of all watched paths and push the initial snapshot."""
