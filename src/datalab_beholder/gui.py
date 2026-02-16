@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import tkinter as tk
+import tkinter.font as tkfont
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -19,7 +20,7 @@ from typing import TYPE_CHECKING
 
 import yaml
 
-from datalab_beholder.config import BeholderConfig, load_config
+from datalab_beholder.config import BeholderConfig, load_config, write_config_template
 from datalab_beholder.daemon import BeholderDaemon
 
 if TYPE_CHECKING:
@@ -36,6 +37,27 @@ GREEN = "#00cc00"
 YELLOW = "#cccc00"
 RED = "#cc0000"
 GREY = "#666666"
+
+# -- Fonts (derived from system defaults after Tk root exists) ---------------
+FONT_TITLE: tuple[str, int, str]
+FONT_HEADING: tuple[str, int, str]
+FONT: tuple[str, int]
+FONT_SM: tuple[str, int]
+FONT_MONO: tuple[str, int]
+
+
+def _init_fonts() -> None:
+    """Populate font constants from the platform's default fonts."""
+    global FONT_TITLE, FONT_HEADING, FONT, FONT_SM, FONT_MONO
+    default = tkfont.nametofont("TkDefaultFont").actual()
+    family = default["family"]
+    size = abs(default["size"])  # negative means pixels on some platforms
+    mono = tkfont.nametofont("TkFixedFont").actual()["family"]
+    FONT_TITLE = (family, size + 8, "bold")
+    FONT_HEADING = (family, size + 2, "bold")
+    FONT = (family, size)
+    FONT_SM = (family, max(size - 1, 8))
+    FONT_MONO = (mono, size)
 
 TICK_MS = 1000
 CONNECTION_CHECK_TICKS = 30  # check connection every 30s
@@ -69,13 +91,20 @@ class BeholderGUI(tk.Tk):
 
     def __init__(self, config_path: Path | None = None):
         super().__init__()
+        _init_fonts()
         self.title("BEHOLDER")
         self.configure(bg=BG)
         self.geometry("620x520")
         self.minsize(500, 400)
 
         self._config_path = config_path
-        self._config = load_config(config_path)
+        try:
+            self._config = load_config(config_path)
+        except FileNotFoundError:
+            log.info("No config file found — creating template")
+            written = write_config_template(config_path)
+            self._config_path = written
+            self._config = load_config(written)
         self._daemon: BeholderDaemon | None = None
         self._running = False
         self._tick_counter = 0
@@ -105,7 +134,7 @@ class BeholderGUI(tk.Tk):
         header.columnconfigure(0, weight=1)
 
         tk.Label(
-            header, text="BEHOLDER", font=("Helvetica", 16, "bold"),
+            header, text="BEHOLDER", font=FONT_TITLE,
             bg=BG, fg=FG,
         ).grid(row=0, column=0, sticky="w")
 
@@ -132,7 +161,7 @@ class BeholderGUI(tk.Tk):
         panel.columnconfigure(1, weight=1)
 
         tk.Label(
-            panel, text="STATUS", font=("Helvetica", 10, "bold"),
+            panel, text="STATUS", font=FONT_HEADING,
             bg=BG, fg=FG_DIM, anchor="w",
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
@@ -152,12 +181,12 @@ class BeholderGUI(tk.Tk):
             setattr(self, attr, (canvas, oval))
 
             tk.Label(
-                panel, text=label, font=("Helvetica", 10),
+                panel, text=label, font=FONT,
                 bg=BG, fg=FG, anchor="w", width=8,
             ).grid(row=i, column=1, sticky="w")
 
             status_label = tk.Label(
-                panel, text="—", font=("Helvetica", 10),
+                panel, text="—", font=FONT,
                 bg=BG, fg=FG_DIM, anchor="w",
             )
             status_label.grid(row=i, column=2, sticky="w")
@@ -176,12 +205,12 @@ class BeholderGUI(tk.Tk):
             ("Pending:", "_pending_val"),
         ]):
             tk.Label(
-                stats, text=label, font=("Helvetica", 9),
+                stats, text=label, font=FONT_SM,
                 bg=BG, fg=FG_DIM,
             ).grid(row=0, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
 
             val = tk.Label(
-                stats, text="—", font=("Helvetica", 9),
+                stats, text="—", font=FONT_SM,
                 bg=BG, fg=FG,
             )
             val.grid(row=0, column=col * 2 + 1, sticky="w")
@@ -198,7 +227,7 @@ class BeholderGUI(tk.Tk):
         header.columnconfigure(0, weight=1)
 
         tk.Label(
-            header, text="ACTIVITY LOG", font=("Helvetica", 10, "bold"),
+            header, text="ACTIVITY LOG", font=FONT_HEADING,
             bg=BG, fg=FG_DIM,
         ).grid(row=0, column=0, sticky="w")
 
@@ -216,7 +245,7 @@ class BeholderGUI(tk.Tk):
 
         self._log_text = tk.Text(
             text_frame,
-            font=("Consolas", 9),
+            font=FONT_MONO,
             bg="#1e1e1e", fg=FG,
             insertbackground=FG,
             selectbackground="#264f78",
@@ -286,6 +315,7 @@ class BeholderGUI(tk.Tk):
         self._start_stop_btn.configure(text="Stop", fg=RED, activeforeground=RED)
         self._settings_btn.configure(state="disabled")
         self._tick_counter = 0
+        self._check_connection()
         self._tick()
 
     def _stop_daemon(self) -> None:
@@ -300,6 +330,21 @@ class BeholderGUI(tk.Tk):
         self._set_indicator(self._auth_ind, GREY, self._auth_ind_label, "—")
         self._set_indicator(self._sync_ind, GREY, self._sync_ind_label, "—")
 
+    # -- Connection check -----------------------------------------------------
+
+    def _check_connection(self) -> None:
+        """Run a connection/auth check against the server."""
+        if self._daemon is None:
+            return
+        try:
+            self._server_reachable, self._authenticated = (
+                self._daemon.client.check_connection()
+            )
+        except Exception:
+            self._server_reachable = False
+            self._authenticated = False
+        self._update_status()
+
     # -- Tick loop (driven by Tk.after) ---------------------------------------
 
     def _tick(self) -> None:
@@ -313,15 +358,8 @@ class BeholderGUI(tk.Tk):
 
         self._tick_counter += 1
 
-        # Check connection periodically
         if self._tick_counter % CONNECTION_CHECK_TICKS == 0:
-            try:
-                self._server_reachable, self._authenticated = (
-                    self._daemon.client.check_connection()
-                )
-            except Exception:
-                self._server_reachable = False
-                self._authenticated = False
+            self._check_connection()
 
         self._update_status()
         self.after(TICK_MS, self._tick)
@@ -332,10 +370,6 @@ class BeholderGUI(tk.Tk):
 
         # Server indicator
         if self._server_reachable:
-            self._set_indicator(
-                self._server_ind, GREEN, self._server_ind_label, "Connected",
-            )
-        elif self._daemon.client.last_request_ok:
             self._set_indicator(
                 self._server_ind, GREEN, self._server_ind_label, "Connected",
             )
@@ -364,9 +398,13 @@ class BeholderGUI(tk.Tk):
             self._set_indicator(
                 self._sync_ind, RED, self._sync_ind_label, "Error",
             )
-        else:
+        elif self._daemon.last_push_time is not None:
             self._set_indicator(
                 self._sync_ind, GREEN, self._sync_ind_label, "Idle",
+            )
+        else:
+            self._set_indicator(
+                self._sync_ind, GREY, self._sync_ind_label, "Waiting",
             )
 
         # Stats
@@ -430,7 +468,7 @@ class SettingsDialog(tk.Toplevel):
 
         # -- Connection section -----------------------------------------------
         tk.Label(
-            self, text="datalab URL:", font=("Helvetica", 10),
+            self, text="datalab URL:", font=FONT,
             bg=BG, fg=FG, anchor="w",
         ).grid(row=0, column=0, sticky="w", **pad)
 
@@ -442,7 +480,7 @@ class SettingsDialog(tk.Toplevel):
         ).grid(row=1, column=0, sticky="ew", **pad)
 
         tk.Label(
-            self, text="API Key:", font=("Helvetica", 10),
+            self, text="API Key:", font=FONT,
             bg=BG, fg=FG, anchor="w",
         ).grid(row=2, column=0, sticky="w", **pad)
 
@@ -455,7 +493,7 @@ class SettingsDialog(tk.Toplevel):
 
         # -- Watched paths section --------------------------------------------
         tk.Label(
-            self, text="Watched Paths:", font=("Helvetica", 10, "bold"),
+            self, text="Watched Paths:", font=FONT_HEADING,
             bg=BG, fg=FG, anchor="w",
         ).grid(row=4, column=0, sticky="w", padx=12, pady=(12, 4))
 
@@ -475,7 +513,7 @@ class SettingsDialog(tk.Toplevel):
 
         # -- Sync intervals ---------------------------------------------------
         tk.Label(
-            self, text="Sync intervals:", font=("Helvetica", 10, "bold"),
+            self, text="Sync intervals:", font=FONT_HEADING,
             bg=BG, fg=FG, anchor="w",
         ).grid(row=7, column=0, sticky="w", padx=12, pady=(12, 4))
 
@@ -483,7 +521,7 @@ class SettingsDialog(tk.Toplevel):
         intervals_frame.grid(row=8, column=0, sticky="ew", padx=12)
 
         tk.Label(
-            intervals_frame, text="Metadata push:", font=("Helvetica", 9),
+            intervals_frame, text="Metadata push:", font=FONT_SM,
             bg=BG, fg=FG,
         ).grid(row=0, column=0, sticky="w")
 
@@ -496,12 +534,12 @@ class SettingsDialog(tk.Toplevel):
         ).grid(row=0, column=1, padx=4)
 
         tk.Label(
-            intervals_frame, text="s", font=("Helvetica", 9),
+            intervals_frame, text="s", font=FONT_SM,
             bg=BG, fg=FG_DIM,
         ).grid(row=0, column=2, sticky="w")
 
         tk.Label(
-            intervals_frame, text="File request poll:", font=("Helvetica", 9),
+            intervals_frame, text="File request poll:", font=FONT_SM,
             bg=BG, fg=FG,
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
@@ -514,7 +552,7 @@ class SettingsDialog(tk.Toplevel):
         ).grid(row=1, column=1, padx=4, pady=(4, 0))
 
         tk.Label(
-            intervals_frame, text="s", font=("Helvetica", 9),
+            intervals_frame, text="s", font=FONT_SM,
             bg=BG, fg=FG_DIM,
         ).grid(row=1, column=2, sticky="w", pady=(4, 0))
 
@@ -652,7 +690,7 @@ class AddPathDialog(tk.Toplevel):
         pad = {"padx": 12, "pady": 4}
 
         tk.Label(
-            self, text="Name:", font=("Helvetica", 10),
+            self, text="Name:", font=FONT,
             bg=BG, fg=FG, anchor="w",
         ).grid(row=0, column=0, sticky="w", **pad)
 
@@ -663,7 +701,7 @@ class AddPathDialog(tk.Toplevel):
         ).grid(row=1, column=0, sticky="ew", **pad)
 
         tk.Label(
-            self, text="Path:", font=("Helvetica", 10),
+            self, text="Path:", font=FONT,
             bg=BG, fg=FG, anchor="w",
         ).grid(row=2, column=0, sticky="w", **pad)
 
@@ -685,7 +723,7 @@ class AddPathDialog(tk.Toplevel):
 
         tk.Label(
             self, text="Include patterns (comma-separated):",
-            font=("Helvetica", 9), bg=BG, fg=FG, anchor="w",
+            font=FONT_SM, bg=BG, fg=FG, anchor="w",
         ).grid(row=4, column=0, sticky="w", **pad)
 
         self._include_var = tk.StringVar(value="*")
@@ -696,7 +734,7 @@ class AddPathDialog(tk.Toplevel):
 
         tk.Label(
             self, text="Exclude patterns (comma-separated):",
-            font=("Helvetica", 9), bg=BG, fg=FG, anchor="w",
+            font=FONT_SM, bg=BG, fg=FG, anchor="w",
         ).grid(row=6, column=0, sticky="w", **pad)
 
         self._exclude_var = tk.StringVar()
