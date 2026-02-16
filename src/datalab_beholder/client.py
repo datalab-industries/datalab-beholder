@@ -50,20 +50,26 @@ class BeholderClient(BaseDatalabClient):
     def check_connection(self) -> tuple[bool, bool]:
         """Check server reachability and authentication.
 
-        Performs a lightweight GET to ``/info``. If it succeeds the server
-        is reachable; if the response includes valid data the API key is
-        accepted.
+        Performs a lightweight GET to ``/info`` to test reachability.
+        Auth is considered configured when a real API key is present
+        (non-empty, non-placeholder).  A proper server-side auth check
+        will be added once the ``/api/remote-files/*`` endpoints exist.
 
         Returns:
             ``(reachable, authenticated)`` booleans.
         """
+        reachable = False
+        authenticated = False
         try:
-            info = self.get_info()
+            self.get_info()
             reachable = True
-            authenticated = bool(info)
         except Exception:
-            reachable = False
-            authenticated = False
+            pass
+
+        if reachable:
+            key = self._headers.get("DATALAB-API-KEY", "")
+            authenticated = bool(key) and key != "your-api-key-here"
+
         self.last_request_ok = reachable
         return reachable, authenticated
 

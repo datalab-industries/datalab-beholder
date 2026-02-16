@@ -24,7 +24,7 @@ def main() -> None:
     "--path",
     type=click.Path(path_type=Path),
     default=None,
-    help="Where to write the config file. Default: ~/.datalab-beholder/config.yaml",
+    help="Where to write the config file. Default: config.yaml alongside the package/executable",
 )
 def init(path: Path | None) -> None:
     """Create a configuration template."""
@@ -81,7 +81,7 @@ def scan(
     "config_path",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to config file. Default: ~/.datalab-beholder/config.yaml",
+    help="Path to config file. Default: config.yaml alongside the package/executable",
 )
 @click.option(
     "--log-level",
@@ -121,7 +121,7 @@ def start(config_path: Path | None, log_level: str | None) -> None:
     "config_path",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to config file. Default: ~/.datalab-beholder/config.yaml",
+    help="Path to config file. Default: config.yaml alongside the package/executable",
 )
 @click.option(
     "--log-level",
@@ -162,7 +162,7 @@ def gui(config_path: Path | None, log_level: str | None) -> None:
     "config_path",
     type=click.Path(exists=True, path_type=Path),
     default=None,
-    help="Path to config file. Default: ~/.datalab-beholder/config.yaml",
+    help="Path to config file. Default: config.yaml alongside the package/executable",
 )
 def status(config_path: Path | None) -> None:
     """Show daemon state and sync history."""

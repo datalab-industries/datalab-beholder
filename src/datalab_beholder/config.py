@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, field_validator
 
-DEFAULT_CONFIG_DIR = Path("~/.datalab-beholder").expanduser()
+if getattr(sys, "frozen", False):
+    # PyInstaller bundle: config lives next to the executable
+    DEFAULT_CONFIG_DIR = Path(sys.executable).resolve().parent
+else:
+    # Running from source: config lives alongside the package
+    DEFAULT_CONFIG_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "config.yaml"
 DEFAULT_STATE_DB_PATH = DEFAULT_CONFIG_DIR / "state.db"
 
@@ -31,7 +37,7 @@ sync:
   file_request_poll: 60    # seconds (1 minute)
 
 log_level: "info"
-# state_db: "~/.datalab-beholder/state.db"
+# state_db: "state.db"  # defaults to alongside the package/executable
 """
 
 
@@ -93,7 +99,7 @@ def load_config(path: Path | None = None) -> BeholderConfig:
     """Load and validate configuration from a YAML file.
 
     Args:
-        path: Path to config file. Defaults to ~/.datalab-beholder/config.yaml.
+        path: Path to config file. Defaults to config.yaml alongside the package.
 
     Returns:
         Validated BeholderConfig instance.
@@ -125,7 +131,7 @@ def write_config_template(path: Path | None = None) -> Path:
     """Write a config template YAML file.
 
     Args:
-        path: Where to write the template. Defaults to ~/.datalab-beholder/config.yaml.
+        path: Where to write the template. Defaults to config.yaml alongside the package.
 
     Returns:
         The path where the template was written.
