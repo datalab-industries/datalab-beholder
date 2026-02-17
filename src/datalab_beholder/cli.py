@@ -13,10 +13,13 @@ import click
 from datalab_beholder import __version__
 
 
-@click.group()
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__)
-def main() -> None:
+@click.pass_context
+def main(ctx: click.Context) -> None:
     """Filesystem watcher daemon for datalab instances."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(gui)
 
 
 @main.command()
