@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from datalab_beholder.client import BeholderClient
-from tests.conftest import MockTransport, _make_beholder_client
+from tests.conftest import _make_beholder_client
 
 
 class TestBeholderClient:
@@ -112,7 +111,9 @@ class TestBeholderClient:
 
         assert result is True
 
-    def test_upload_file_missing(self, mock_transport, monkeypatch, tmp_path: Path) -> None:
+    def test_upload_file_missing(
+        self, mock_transport, monkeypatch, tmp_path: Path
+    ) -> None:
         client = _make_beholder_client(mock_transport, monkeypatch)
 
         result = client.upload_file(

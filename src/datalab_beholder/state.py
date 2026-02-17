@@ -169,9 +169,7 @@ class StateStore:
         self._conn.commit()
         return diff
 
-    def upsert_entries(
-        self, watched_path_name: str, entries: list[FileEntry]
-    ) -> None:
+    def upsert_entries(self, watched_path_name: str, entries: list[FileEntry]) -> None:
         """Insert or update individual file entries without deletion detection.
 
         Used by the watcher for incremental updates — only touches the entries
@@ -190,7 +188,9 @@ class StateStore:
                     "VALUES (?, ?, ?, ?, 'new')",
                     (entry.path, watched_path_name, entry.size, entry.modified),
                 )
-            elif existing["size"] != entry.size or existing["modified"] != entry.modified:
+            elif (
+                existing["size"] != entry.size or existing["modified"] != entry.modified
+            ):
                 self._conn.execute(
                     "UPDATE files SET size = ?, modified = ?, status = 'modified' "
                     "WHERE path = ? AND watched_path_name = ?",
@@ -198,9 +198,7 @@ class StateStore:
                 )
         self._conn.commit()
 
-    def mark_entries_deleted(
-        self, watched_path_name: str, paths: list[str]
-    ) -> None:
+    def mark_entries_deleted(self, watched_path_name: str, paths: list[str]) -> None:
         """Mark specific file entries as deleted.
 
         Used by the watcher when it receives delete events.

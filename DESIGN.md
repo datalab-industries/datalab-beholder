@@ -112,7 +112,7 @@ A lightweight daemon for monitoring laboratory instrument file systems and synch
 #### 1. File System Scanning Library (new, shared component)
 - **Language**: Go (see rationale below)
 - **Purpose**: Efficient file system traversal and metadata extraction
-- **Modes**: 
+- **Modes**:
  - Standalone CLI for SSH use case
  - Library for daemon integration
 - **Output**: Structured JSON with file metadata and optional diffs
@@ -141,35 +141,35 @@ A lightweight daemon for monitoring laboratory instrument file systems and synch
 
 #### Instrument Daemon Flow
 ```
-[Instrument PC] 
+[Instrument PC]
                  (every 20 min)
-                     
+
                  [datalab Server]
                       Request file attachment
-                     
+
                  Queue in MongoDB
-                     
-[Daemon] 
+
+[Daemon]
                  [datalab Server]
                       POST /api/remote-files/upload
-                     
+
                  File storage + Sample attachment
 ```
 
 #### SSH Remote Scanning Flow
 ```
-[User in UI] 
+[User in UI]
                  [datalab Server]
-                     
+
                  Transfer scanning library binary (if needed)
-                     
+
                  Parse JSON output
-                     
+
                  Display in UI
 
-[User in UI] 
+[User in UI]
                  [datalab Server]
-                     
+
                  Store and attach to sample
 ```
 
@@ -266,17 +266,17 @@ datalab-fs-scan /path/to/scan \
 datalab:
  url: "https://datalab.example.org"
  api_key: "daemon-specific-api-key"
- 
+
 watched_paths:
  - path: "/mnt/instrument/data"
    name: "XRD-Room-A"
    include_patterns: ["*.raw", "*.csv", "*.txt"]
    exclude_patterns: ["**/temp/**", "**/.tmp"]
-   
+
 sync:
  metadata_interval: 1200  # seconds (20 minutes)
  file_request_poll: 60    # seconds (1 minute)
- 
+
 daemon:
  log_level: "info"
  cache_db: "/var/lib/datalab-daemon/cache.db"
@@ -399,11 +399,11 @@ GET /api/remote-files/pending?daemon_id=xrd-room-a
 
 2. **File Request Workflow (Daemon Sources)**
   ```
-  User clicks "Attach to Sample" 
-  Files added to request queue 
-  Updates to "Available" when uploaded 
-  Server triggers SSH scan (if cache stale) 
-  User clicks "Attach to Sample" 
+  User clicks "Attach to Sample"
+  Files added to request queue
+  Updates to "Available" when uploaded
+  Server triggers SSH scan (if cache stale)
+  User clicks "Attach to Sample"
   File stored and attached to sample
   ```
 

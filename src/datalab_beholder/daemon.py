@@ -7,7 +7,6 @@ import os
 import signal
 import threading
 import time
-from pathlib import Path
 from typing import Any
 
 from datalab_beholder.client import BeholderClient

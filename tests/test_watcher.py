@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 from watchdog.events import (
     DirCreatedEvent,
@@ -58,9 +57,14 @@ class TestBeholderEventHandler:
         # Seed the file into state first
         from datalab_beholder.scanner import FileEntry
 
-        state.upsert_entries("test", [
-            FileEntry(path="existing.csv", size=8, modified=1000.0, is_directory=False),
-        ])
+        state.upsert_entries(
+            "test",
+            [
+                FileEntry(
+                    path="existing.csv", size=8, modified=1000.0, is_directory=False
+                ),
+            ],
+        )
 
         # Now modify
         f.write_text("modified content that is longer")
@@ -81,9 +85,14 @@ class TestBeholderEventHandler:
         state = StateStore(tmp_path / "test.db")
         from datalab_beholder.scanner import FileEntry
 
-        state.upsert_entries("test", [
-            FileEntry(path="gone.csv", size=10, modified=1000.0, is_directory=False),
-        ])
+        state.upsert_entries(
+            "test",
+            [
+                FileEntry(
+                    path="gone.csv", size=10, modified=1000.0, is_directory=False
+                ),
+            ],
+        )
 
         handler = self._make_handler(data, state)
         handler.on_deleted(FileDeletedEvent(str(data / "gone.csv")))

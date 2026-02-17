@@ -68,7 +68,9 @@ class TestBeholderDaemon:
         # Should have made a metadata push
         assert len(transport.requests) == 1
 
-    def test_initial_scan_handles_missing_path(self, tmp_path: Path, monkeypatch) -> None:
+    def test_initial_scan_handles_missing_path(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
         """Initial scan should handle watched paths that don't exist."""
         config = BeholderConfig(
             datalab={"url": "https://test.example.org", "api_key": "test-key"},
@@ -106,9 +108,14 @@ class TestBeholderDaemon:
         # Simulate watcher adding a new entry
         from datalab_beholder.scanner import FileEntry
 
-        daemon._state.upsert_entries("test-data", [
-            FileEntry(path="watcher_new.csv", size=42, modified=9999.0, is_directory=False),
-        ])
+        daemon._state.upsert_entries(
+            "test-data",
+            [
+                FileEntry(
+                    path="watcher_new.csv", size=42, modified=9999.0, is_directory=False
+                ),
+            ],
+        )
 
         daemon._push_pending_changes()
 
@@ -288,9 +295,12 @@ class TestBeholderDaemon:
         # Add a pending entry
         from datalab_beholder.scanner import FileEntry
 
-        daemon._state.upsert_entries("test-data", [
-            FileEntry(path="new.csv", size=10, modified=9999.0, is_directory=False),
-        ])
+        daemon._state.upsert_entries(
+            "test-data",
+            [
+                FileEntry(path="new.csv", size=10, modified=9999.0, is_directory=False),
+            ],
+        )
 
         # Force the push interval to have elapsed
         daemon._last_push_mono = time.monotonic() - config.sync.metadata_interval - 1
@@ -298,9 +308,7 @@ class TestBeholderDaemon:
         daemon.tick()
 
         # Should have pushed
-        push_requests = [
-            r for r in transport.requests if r.method == "POST"
-        ]
+        push_requests = [r for r in transport.requests if r.method == "POST"]
         assert len(push_requests) >= 1
         assert daemon.last_push_time is not None
 

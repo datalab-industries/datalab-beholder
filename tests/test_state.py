@@ -169,13 +169,19 @@ class TestStateStore:
         from datalab_beholder.scanner import FileEntry
 
         store = StateStore(tmp_path / "test.db")
-        store.upsert_entries("wp", [
-            FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
-        ])
+        store.upsert_entries(
+            "wp",
+            [
+                FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
+            ],
+        )
         # Upsert same path with new size
-        store.upsert_entries("wp", [
-            FileEntry(path="a.csv", size=999, modified=1000.0, is_directory=False),
-        ])
+        store.upsert_entries(
+            "wp",
+            [
+                FileEntry(path="a.csv", size=999, modified=1000.0, is_directory=False),
+            ],
+        )
 
         pending = store.get_pending_changes("wp")
         assert len(pending) == 1
@@ -183,7 +189,9 @@ class TestStateStore:
         assert pending[0].size == 999
         store.close()
 
-    def test_upsert_entries_no_false_deletions(self, tmp_path: Path, tmp_tree: Path) -> None:
+    def test_upsert_entries_no_false_deletions(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
         """upsert_entries should not mark missing entries as deleted."""
         from datalab_beholder.scanner import FileEntry
 
@@ -192,9 +200,14 @@ class TestStateStore:
         store.update_from_scan(result)
 
         # Upsert only one new file — existing entries must stay untouched
-        store.upsert_entries("test", [
-            FileEntry(path="brand_new.csv", size=10, modified=99.0, is_directory=False),
-        ])
+        store.upsert_entries(
+            "test",
+            [
+                FileEntry(
+                    path="brand_new.csv", size=10, modified=99.0, is_directory=False
+                ),
+            ],
+        )
 
         pending = store.get_pending_changes("test")
         # The original files should still be pending (status=new from initial scan)
@@ -226,9 +239,12 @@ class TestStateStore:
         from datalab_beholder.scanner import FileEntry
 
         store = StateStore(tmp_path / "test.db")
-        store.upsert_entries("wp", [
-            FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
-        ])
+        store.upsert_entries(
+            "wp",
+            [
+                FileEntry(path="a.csv", size=100, modified=1000.0, is_directory=False),
+            ],
+        )
         store.mark_entries_deleted("wp", ["a.csv"])
         store.mark_entries_deleted("wp", ["a.csv"])  # again
 

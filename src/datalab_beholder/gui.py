@@ -15,7 +15,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 from typing import TYPE_CHECKING
 
 import yaml
@@ -59,11 +59,13 @@ def _init_fonts() -> None:
     FONT_SM = (family, max(size - 1, 8))
     FONT_MONO = (mono, size)
 
+
 TICK_MS = 1000
 CONNECTION_CHECK_TICKS = 30  # check connection every 30s
 
 
 # -- Logging handler that writes to a Tk Text widget -------------------------
+
 
 class TextWidgetHandler(logging.Handler):
     """Logging handler that appends formatted records to a Tk Text widget."""
@@ -85,6 +87,7 @@ class TextWidgetHandler(logging.Handler):
 
 
 # -- Main GUI ----------------------------------------------------------------
+
 
 class BeholderGUI(tk.Tk):
     """Main beholder GUI window."""
@@ -134,24 +137,41 @@ class BeholderGUI(tk.Tk):
         header.columnconfigure(0, weight=1)
 
         tk.Label(
-            header, text="BEHOLDER", font=FONT_TITLE,
-            bg=BG, fg=FG,
+            header,
+            text="BEHOLDER",
+            font=FONT_TITLE,
+            bg=BG,
+            fg=FG,
         ).grid(row=0, column=0, sticky="w")
 
         btn_frame = tk.Frame(header, bg=BG)
         btn_frame.grid(row=0, column=1, sticky="e")
 
         self._settings_btn = tk.Button(
-            btn_frame, text="Settings", command=self._open_settings,
-            bg=BG_LIGHT, fg=FG, activebackground=BG, activeforeground=FG,
-            relief="flat", padx=8, pady=2,
+            btn_frame,
+            text="Settings",
+            command=self._open_settings,
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            padx=8,
+            pady=2,
         )
         self._settings_btn.pack(side="left", padx=(0, 4))
 
         self._start_stop_btn = tk.Button(
-            btn_frame, text="Start", command=self._toggle_daemon,
-            bg=BG_LIGHT, fg=GREEN, activebackground=BG, activeforeground=GREEN,
-            relief="flat", padx=8, pady=2,
+            btn_frame,
+            text="Start",
+            command=self._toggle_daemon,
+            bg=BG_LIGHT,
+            fg=GREEN,
+            activebackground=BG,
+            activeforeground=GREEN,
+            relief="flat",
+            padx=8,
+            pady=2,
         )
         self._start_stop_btn.pack(side="left")
 
@@ -161,8 +181,12 @@ class BeholderGUI(tk.Tk):
         panel.columnconfigure(1, weight=1)
 
         tk.Label(
-            panel, text="STATUS", font=FONT_HEADING,
-            bg=BG, fg=FG_DIM, anchor="w",
+            panel,
+            text="STATUS",
+            font=FONT_HEADING,
+            bg=BG,
+            fg=FG_DIM,
+            anchor="w",
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 4))
 
         # Indicator rows: (label, attr_name)
@@ -173,7 +197,10 @@ class BeholderGUI(tk.Tk):
         ]
         for i, (label, attr) in enumerate(indicators, start=1):
             canvas = tk.Canvas(
-                panel, width=12, height=12, bg=BG,
+                panel,
+                width=12,
+                height=12,
+                bg=BG,
                 highlightthickness=0,
             )
             canvas.grid(row=i, column=0, sticky="w", padx=(4, 6))
@@ -181,13 +208,22 @@ class BeholderGUI(tk.Tk):
             setattr(self, attr, (canvas, oval))
 
             tk.Label(
-                panel, text=label, font=FONT,
-                bg=BG, fg=FG, anchor="w", width=8,
+                panel,
+                text=label,
+                font=FONT,
+                bg=BG,
+                fg=FG,
+                anchor="w",
+                width=8,
             ).grid(row=i, column=1, sticky="w")
 
             status_label = tk.Label(
-                panel, text="—", font=FONT,
-                bg=BG, fg=FG_DIM, anchor="w",
+                panel,
+                text="—",
+                font=FONT,
+                bg=BG,
+                fg=FG_DIM,
+                anchor="w",
             )
             status_label.grid(row=i, column=2, sticky="w")
             setattr(self, f"{attr}_label", status_label)
@@ -199,19 +235,27 @@ class BeholderGUI(tk.Tk):
         stats = tk.Frame(panel, bg=BG)
         stats.grid(row=len(indicators) + 2, column=0, columnspan=3, sticky="ew")
 
-        for col, (label, attr) in enumerate([
-            ("Last scan:", "_last_scan_val"),
-            ("Last push:", "_last_push_val"),
-            ("Pending:", "_pending_val"),
-        ]):
+        for col, (label, attr) in enumerate(
+            [
+                ("Last scan:", "_last_scan_val"),
+                ("Last push:", "_last_push_val"),
+                ("Pending:", "_pending_val"),
+            ]
+        ):
             tk.Label(
-                stats, text=label, font=FONT_SM,
-                bg=BG, fg=FG_DIM,
+                stats,
+                text=label,
+                font=FONT_SM,
+                bg=BG,
+                fg=FG_DIM,
             ).grid(row=0, column=col * 2, sticky="w", padx=(0 if col == 0 else 12, 4))
 
             val = tk.Label(
-                stats, text="—", font=FONT_SM,
-                bg=BG, fg=FG,
+                stats,
+                text="—",
+                font=FONT_SM,
+                bg=BG,
+                fg=FG,
             )
             val.grid(row=0, column=col * 2 + 1, sticky="w")
             setattr(self, attr, val)
@@ -227,14 +271,24 @@ class BeholderGUI(tk.Tk):
         header.columnconfigure(0, weight=1)
 
         tk.Label(
-            header, text="ACTIVITY LOG", font=FONT_HEADING,
-            bg=BG, fg=FG_DIM,
+            header,
+            text="ACTIVITY LOG",
+            font=FONT_HEADING,
+            bg=BG,
+            fg=FG_DIM,
         ).grid(row=0, column=0, sticky="w")
 
         tk.Button(
-            header, text="Clear Log", command=self._clear_log,
-            bg=BG_LIGHT, fg=FG, activebackground=BG, activeforeground=FG,
-            relief="flat", padx=6, pady=1,
+            header,
+            text="Clear Log",
+            command=self._clear_log,
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            padx=6,
+            pady=1,
         ).grid(row=0, column=1, sticky="e")
 
         # Text widget with scrollbar
@@ -246,7 +300,8 @@ class BeholderGUI(tk.Tk):
         self._log_text = tk.Text(
             text_frame,
             font=FONT_MONO,
-            bg="#1e1e1e", fg=FG,
+            bg="#1e1e1e",
+            fg=FG,
             insertbackground=FG,
             selectbackground="#264f78",
             state="disabled",
@@ -258,8 +313,10 @@ class BeholderGUI(tk.Tk):
         self._log_text.grid(row=0, column=0, sticky="nsew")
 
         scrollbar = tk.Scrollbar(
-            text_frame, command=self._log_text.yview,
-            bg=BG_LIGHT, troughcolor=BG,
+            text_frame,
+            command=self._log_text.yview,
+            bg=BG_LIGHT,
+            troughcolor=BG,
         )
         scrollbar.grid(row=0, column=1, sticky="ns")
         self._log_text.configure(yscrollcommand=scrollbar.set)
@@ -371,40 +428,64 @@ class BeholderGUI(tk.Tk):
         # Server indicator
         if self._server_reachable:
             self._set_indicator(
-                self._server_ind, GREEN, self._server_ind_label, "Connected",
+                self._server_ind,
+                GREEN,
+                self._server_ind_label,
+                "Connected",
             )
         else:
             self._set_indicator(
-                self._server_ind, RED, self._server_ind_label, "Disconnected",
+                self._server_ind,
+                RED,
+                self._server_ind_label,
+                "Disconnected",
             )
 
         # Auth indicator
         if self._authenticated:
             self._set_indicator(
-                self._auth_ind, GREEN, self._auth_ind_label, "Authenticated",
+                self._auth_ind,
+                GREEN,
+                self._auth_ind_label,
+                "Authenticated",
             )
         else:
             self._set_indicator(
-                self._auth_ind, YELLOW, self._auth_ind_label, "Not authenticated",
+                self._auth_ind,
+                YELLOW,
+                self._auth_ind_label,
+                "Not authenticated",
             )
 
         # Sync indicator
         status = self._daemon.sync_status
         if status == "pushing":
             self._set_indicator(
-                self._sync_ind, YELLOW, self._sync_ind_label, "Pushing",
+                self._sync_ind,
+                YELLOW,
+                self._sync_ind_label,
+                "Pushing",
             )
         elif status == "error":
             self._set_indicator(
-                self._sync_ind, RED, self._sync_ind_label, "Error",
+                self._sync_ind,
+                RED,
+                self._sync_ind_label,
+                "Error",
             )
         elif self._daemon.last_push_time is not None:
             self._set_indicator(
-                self._sync_ind, GREEN, self._sync_ind_label, "Idle",
+                self._sync_ind,
+                GREEN,
+                self._sync_ind_label,
+                "Idle",
             )
         else:
             self._set_indicator(
-                self._sync_ind, GREY, self._sync_ind_label, "Waiting",
+                self._sync_ind,
+                GREY,
+                self._sync_ind_label,
+                "Waiting",
             )
 
         # Stats
@@ -438,6 +519,7 @@ class BeholderGUI(tk.Tk):
 
 # -- Settings Dialog ----------------------------------------------------------
 
+
 class SettingsDialog(tk.Toplevel):
     """Modal settings window for editing configuration."""
 
@@ -468,33 +550,52 @@ class SettingsDialog(tk.Toplevel):
 
         # -- Connection section -----------------------------------------------
         tk.Label(
-            self, text="datalab URL:", font=FONT,
-            bg=BG, fg=FG, anchor="w",
+            self,
+            text="datalab URL:",
+            font=FONT,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=0, column=0, sticky="w", **pad)
 
         self._url_var = tk.StringVar(value=self._config.datalab.url)
         tk.Entry(
-            self, textvariable=self._url_var,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG,
+            self,
+            textvariable=self._url_var,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
             relief="flat",
         ).grid(row=1, column=0, sticky="ew", **pad)
 
         tk.Label(
-            self, text="API Key:", font=FONT,
-            bg=BG, fg=FG, anchor="w",
+            self,
+            text="API Key:",
+            font=FONT,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=2, column=0, sticky="w", **pad)
 
         self._api_key_var = tk.StringVar(value=self._config.datalab.api_key)
         tk.Entry(
-            self, textvariable=self._api_key_var, show="*",
-            bg=BG_LIGHT, fg=FG, insertbackground=FG,
+            self,
+            textvariable=self._api_key_var,
+            show="*",
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
             relief="flat",
         ).grid(row=3, column=0, sticky="ew", **pad)
 
         # -- Watched paths section --------------------------------------------
         tk.Label(
-            self, text="Watched Paths:", font=FONT_HEADING,
-            bg=BG, fg=FG, anchor="w",
+            self,
+            text="Watched Paths:",
+            font=FONT_HEADING,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=4, column=0, sticky="w", padx=12, pady=(12, 4))
 
         self._paths_frame = tk.Frame(self, bg=BG)
@@ -506,54 +607,86 @@ class SettingsDialog(tk.Toplevel):
             self._add_path_row(wp.name, str(wp.path))
 
         tk.Button(
-            self, text="+ Add Path", command=self._add_path_dialog,
-            bg=BG_LIGHT, fg=FG, activebackground=BG, activeforeground=FG,
-            relief="flat", padx=6,
+            self,
+            text="+ Add Path",
+            command=self._add_path_dialog,
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            padx=6,
         ).grid(row=6, column=0, sticky="w", padx=12, pady=4)
 
         # -- Sync intervals ---------------------------------------------------
         tk.Label(
-            self, text="Sync intervals:", font=FONT_HEADING,
-            bg=BG, fg=FG, anchor="w",
+            self,
+            text="Sync intervals:",
+            font=FONT_HEADING,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=7, column=0, sticky="w", padx=12, pady=(12, 4))
 
         intervals_frame = tk.Frame(self, bg=BG)
         intervals_frame.grid(row=8, column=0, sticky="ew", padx=12)
 
         tk.Label(
-            intervals_frame, text="Metadata push:", font=FONT_SM,
-            bg=BG, fg=FG,
+            intervals_frame,
+            text="Metadata push:",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG,
         ).grid(row=0, column=0, sticky="w")
 
         self._metadata_var = tk.StringVar(
             value=str(self._config.sync.metadata_interval),
         )
         tk.Entry(
-            intervals_frame, textvariable=self._metadata_var, width=8,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            intervals_frame,
+            textvariable=self._metadata_var,
+            width=8,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=0, column=1, padx=4)
 
         tk.Label(
-            intervals_frame, text="s", font=FONT_SM,
-            bg=BG, fg=FG_DIM,
+            intervals_frame,
+            text="s",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG_DIM,
         ).grid(row=0, column=2, sticky="w")
 
         tk.Label(
-            intervals_frame, text="File request poll:", font=FONT_SM,
-            bg=BG, fg=FG,
+            intervals_frame,
+            text="File request poll:",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG,
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         self._poll_var = tk.StringVar(
             value=str(self._config.sync.file_request_poll),
         )
         tk.Entry(
-            intervals_frame, textvariable=self._poll_var, width=8,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            intervals_frame,
+            textvariable=self._poll_var,
+            width=8,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=1, column=1, padx=4, pady=(4, 0))
 
         tk.Label(
-            intervals_frame, text="s", font=FONT_SM,
-            bg=BG, fg=FG_DIM,
+            intervals_frame,
+            text="s",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG_DIM,
         ).grid(row=1, column=2, sticky="w", pady=(4, 0))
 
         # -- Buttons ----------------------------------------------------------
@@ -561,15 +694,29 @@ class SettingsDialog(tk.Toplevel):
         btn_frame.grid(row=9, column=0, sticky="e", padx=12, pady=(16, 12))
 
         tk.Button(
-            btn_frame, text="Cancel", command=self.destroy,
-            bg=BG_LIGHT, fg=FG, activebackground=BG, activeforeground=FG,
-            relief="flat", padx=12, pady=4,
+            btn_frame,
+            text="Cancel",
+            command=self.destroy,
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            padx=12,
+            pady=4,
         ).pack(side="right", padx=(4, 0))
 
         tk.Button(
-            btn_frame, text="Save", command=self._save,
-            bg=BG_LIGHT, fg=GREEN, activebackground=BG, activeforeground=GREEN,
-            relief="flat", padx=12, pady=4,
+            btn_frame,
+            text="Save",
+            command=self._save,
+            bg=BG_LIGHT,
+            fg=GREEN,
+            activebackground=BG,
+            activeforeground=GREEN,
+            relief="flat",
+            padx=12,
+            pady=4,
         ).pack(side="right")
 
     def _add_path_row(self, name: str, path: str) -> None:
@@ -580,14 +727,23 @@ class SettingsDialog(tk.Toplevel):
 
         name_var = tk.StringVar(value=name)
         tk.Entry(
-            frame, textvariable=name_var, width=14,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            frame,
+            textvariable=name_var,
+            width=14,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=0, column=0, padx=4, pady=2)
 
         path_var = tk.StringVar(value=path)
         tk.Entry(
-            frame, textvariable=path_var,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            frame,
+            textvariable=path_var,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=0, column=1, sticky="ew", padx=4, pady=2)
 
         def remove():
@@ -595,16 +751,24 @@ class SettingsDialog(tk.Toplevel):
             self._path_rows = [r for r in self._path_rows if r["frame"] is not frame]
 
         tk.Button(
-            frame, text="x", command=remove,
-            bg=BG_LIGHT, fg=RED, activebackground=BG, activeforeground=RED,
-            relief="flat", padx=4,
+            frame,
+            text="x",
+            command=remove,
+            bg=BG_LIGHT,
+            fg=RED,
+            activebackground=BG,
+            activeforeground=RED,
+            relief="flat",
+            padx=4,
         ).grid(row=0, column=2, padx=(0, 4), pady=2)
 
-        self._path_rows.append({
-            "frame": frame,
-            "name": name_var,
-            "path": path_var,
-        })
+        self._path_rows.append(
+            {
+                "frame": frame,
+                "name": name_var,
+                "path": path_var,
+            }
+        )
 
     def _add_path_dialog(self) -> None:
         AddPathDialog(self)
@@ -626,7 +790,9 @@ class SettingsDialog(tk.Toplevel):
             poll_interval = int(self._poll_var.get())
         except ValueError:
             messagebox.showerror(
-                "Validation", "Sync intervals must be integers.", parent=self,
+                "Validation",
+                "Sync intervals must be integers.",
+                parent=self,
             )
             return
 
@@ -639,7 +805,9 @@ class SettingsDialog(tk.Toplevel):
 
         if not watched_paths:
             messagebox.showerror(
-                "Validation", "At least one watched path is required.", parent=self,
+                "Validation",
+                "At least one watched path is required.",
+                parent=self,
             )
             return
 
@@ -657,6 +825,7 @@ class SettingsDialog(tk.Toplevel):
         config_path = self._config_path
         if config_path is None:
             from datalab_beholder.config import DEFAULT_CONFIG_PATH
+
             config_path = DEFAULT_CONFIG_PATH
 
         config_path = Path(config_path).expanduser().resolve()
@@ -669,6 +838,7 @@ class SettingsDialog(tk.Toplevel):
 
 
 # -- Add Path Sub-Dialog -----------------------------------------------------
+
 
 class AddPathDialog(tk.Toplevel):
     """Dialog for adding a new watched path with all options."""
@@ -690,19 +860,31 @@ class AddPathDialog(tk.Toplevel):
         pad = {"padx": 12, "pady": 4}
 
         tk.Label(
-            self, text="Name:", font=FONT,
-            bg=BG, fg=FG, anchor="w",
+            self,
+            text="Name:",
+            font=FONT,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=0, column=0, sticky="w", **pad)
 
         self._name_var = tk.StringVar()
         tk.Entry(
-            self, textvariable=self._name_var,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            self,
+            textvariable=self._name_var,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=1, column=0, sticky="ew", **pad)
 
         tk.Label(
-            self, text="Path:", font=FONT,
-            bg=BG, fg=FG, anchor="w",
+            self,
+            text="Path:",
+            font=FONT,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=2, column=0, sticky="w", **pad)
 
         path_frame = tk.Frame(self, bg=BG)
@@ -711,36 +893,62 @@ class AddPathDialog(tk.Toplevel):
 
         self._path_var = tk.StringVar()
         tk.Entry(
-            path_frame, textvariable=self._path_var,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            path_frame,
+            textvariable=self._path_var,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=0, column=0, sticky="ew")
 
         tk.Button(
-            path_frame, text="Browse", command=self._browse,
-            bg=BG_LIGHT, fg=FG, activebackground=BG, activeforeground=FG,
-            relief="flat", padx=6,
+            path_frame,
+            text="Browse",
+            command=self._browse,
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            padx=6,
         ).grid(row=0, column=1, padx=(4, 0))
 
         tk.Label(
-            self, text="Include patterns (comma-separated):",
-            font=FONT_SM, bg=BG, fg=FG, anchor="w",
+            self,
+            text="Include patterns (comma-separated):",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=4, column=0, sticky="w", **pad)
 
         self._include_var = tk.StringVar(value="*")
         tk.Entry(
-            self, textvariable=self._include_var,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            self,
+            textvariable=self._include_var,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=5, column=0, sticky="ew", **pad)
 
         tk.Label(
-            self, text="Exclude patterns (comma-separated):",
-            font=FONT_SM, bg=BG, fg=FG, anchor="w",
+            self,
+            text="Exclude patterns (comma-separated):",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG,
+            anchor="w",
         ).grid(row=6, column=0, sticky="w", **pad)
 
         self._exclude_var = tk.StringVar()
         tk.Entry(
-            self, textvariable=self._exclude_var,
-            bg=BG_LIGHT, fg=FG, insertbackground=FG, relief="flat",
+            self,
+            textvariable=self._exclude_var,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
         ).grid(row=7, column=0, sticky="ew", **pad)
 
         # Buttons
@@ -748,15 +956,29 @@ class AddPathDialog(tk.Toplevel):
         btn_frame.grid(row=8, column=0, sticky="e", padx=12, pady=(12, 12))
 
         tk.Button(
-            btn_frame, text="Cancel", command=self.destroy,
-            bg=BG_LIGHT, fg=FG, activebackground=BG, activeforeground=FG,
-            relief="flat", padx=12, pady=4,
+            btn_frame,
+            text="Cancel",
+            command=self.destroy,
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            padx=12,
+            pady=4,
         ).pack(side="right", padx=(4, 0))
 
         tk.Button(
-            btn_frame, text="Add", command=self._add,
-            bg=BG_LIGHT, fg=GREEN, activebackground=BG, activeforeground=GREEN,
-            relief="flat", padx=12, pady=4,
+            btn_frame,
+            text="Add",
+            command=self._add,
+            bg=BG_LIGHT,
+            fg=GREEN,
+            activebackground=BG,
+            activeforeground=GREEN,
+            relief="flat",
+            padx=12,
+            pady=4,
         ).pack(side="right")
 
     def _browse(self) -> None:
@@ -772,7 +994,9 @@ class AddPathDialog(tk.Toplevel):
 
         if not name or not path:
             messagebox.showerror(
-                "Validation", "Name and path are required.", parent=self,
+                "Validation",
+                "Name and path are required.",
+                parent=self,
             )
             return
 

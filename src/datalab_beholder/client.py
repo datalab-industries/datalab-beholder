@@ -117,7 +117,9 @@ class BeholderClient(BaseDatalabClient):
             return result
         except DatalabAPIError as e:
             wait = self._increase_backoff()
-            log.error("Request failed for %s %s: %s (backing off %.1fs)", method, url, e, wait)
+            log.error(
+                "Request failed for %s %s: %s (backing off %.1fs)", method, url, e, wait
+            )
             self.last_request_ok = False
             return None
 
