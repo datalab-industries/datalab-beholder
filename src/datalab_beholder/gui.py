@@ -16,7 +16,7 @@ import tkinter.font as tkfont
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
@@ -99,6 +99,17 @@ class BeholderGUI(tk.Tk):
         self.configure(bg=BG)
         self.geometry("620x520")
         self.minsize(500, 400)
+
+        # Indicator widgets (populated by _build_status_panel)
+        self._server_ind: tuple[tk.Canvas, int]
+        self._auth_ind: tuple[tk.Canvas, int]
+        self._sync_ind: tuple[tk.Canvas, int]
+        self._server_ind_label: tk.Label
+        self._auth_ind_label: tk.Label
+        self._sync_ind_label: tk.Label
+        self._last_scan_val: tk.Label
+        self._last_push_val: tk.Label
+        self._pending_val: tk.Label
 
         self._config_path = config_path
         try:
@@ -546,7 +557,7 @@ class SettingsDialog(tk.Toplevel):
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
 
-        pad = {"padx": 12, "pady": 4}
+        pad: dict[str, Any] = {"padx": 12, "pady": 4}
 
         # -- Connection section -----------------------------------------------
         tk.Label(
@@ -857,7 +868,7 @@ class AddPathDialog(tk.Toplevel):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        pad = {"padx": 12, "pady": 4}
+        pad: dict[str, Any] = {"padx": 12, "pady": 4}
 
         tk.Label(
             self,
