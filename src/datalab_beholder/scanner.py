@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import logging
 import os
 import time
@@ -62,7 +63,12 @@ class ScanResult:
 
 def _matches_any(name: str, patterns: list[str]) -> bool:
     """Check if a filename matches any of the given glob patterns."""
-    return any(fnmatch.fnmatch(name, p) for p in patterns)
+    return any(fnmatch.fnmatch(name, p) for p in patterns if p)
+
+
+def _matches_regex(name: str, patterns: list[str]) -> bool:
+    """Check if a filename matches any of the given regex patterns."""
+    return any(re.search(p, name) for p in patterns if p)
 
 
 def scan_directory(
@@ -70,7 +76,9 @@ def scan_directory(
     name: str = "",
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
+    id_patterns: list[str] | None = None,
     max_depth: int | None = None,
+    skip_dirs: bool = False,
 ) -> ScanResult:
     """Scan a directory tree and return structured metadata.
 
@@ -81,7 +89,9 @@ def scan_directory(
         name: Human-readable label for this scan.
         include_patterns: Glob patterns for files to include (default: all).
         exclude_patterns: Glob patterns for files to exclude (default: none).
+        id_patterns: Glob patterns to use to match file paths to item IDs (default: none).
         max_depth: Maximum recursion depth (None = unlimited).
+        skip_dirs: If True, directories will not be included in the scan results.
 
     Returns:
         ScanResult with all discovered entries and statistics.
@@ -90,6 +100,8 @@ def scan_directory(
         include_patterns = ["*"]
     if exclude_patterns is None:
         exclude_patterns = []
+    if id_patterns is None:
+        id_patterns = []
 
     root = Path(root).resolve()
     if not name:
@@ -132,19 +144,29 @@ def scan_directory(
 
                 if entry.is_dir(follow_symlinks=False):
                     total_dirs += 1
-                    entries.append(
-                        FileEntry(
-                            path=rel_path,
-                            size=0,
-                            modified=stat.st_mtime,
-                            is_directory=True,
+                    if not skip_dirs:
+                        entries.append(
+                            FileEntry(
+                                path=rel_path,
+                                size=0,
+                                modified=stat.st_mtime,
+                                is_directory=True,
+                            )
                         )
-                    )
                     if max_depth is None or depth < max_depth:
                         _scan(Path(entry.path), depth + 1)
                 elif entry.is_file(follow_symlinks=False):
                     if not _matches_any(entry_name, include_patterns):
                         continue
+
+                    if id_patterns and not _matches_regex(entry_name, id_patterns):
+                        log.debug(
+                            "File %s does not match ID patterns %s, skipping",
+                            entry.path,
+                            id_patterns,
+                        )
+                        continue
+
                     total_files += 1
                     total_size += stat.st_size
                     entries.append(

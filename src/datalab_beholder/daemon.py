@@ -210,6 +210,7 @@ class BeholderDaemon:
             name=wp.name,
             include_patterns=wp.include_patterns,
             exclude_patterns=wp.exclude_patterns,
+            id_patterns=wp.id_patterns,
             max_depth=wp.max_depth,
         )
         log.info(

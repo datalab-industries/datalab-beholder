@@ -48,6 +48,7 @@ class WatchedPath(BaseModel):
     name: str
     include_patterns: list[str] = ["*"]
     exclude_patterns: list[str] = []
+    id_patterns: list[str] = []
     max_depth: int | None = None
 
     @field_validator("path")
