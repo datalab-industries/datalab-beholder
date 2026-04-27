@@ -6,9 +6,8 @@ import os
 import re
 import sys
 from pathlib import Path
-
 import yaml
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
 
 # Controlled vocabulary of named capture groups allowed in id_patterns.
 # These names are the only ones the rest of the daemon knows how to
@@ -26,13 +25,15 @@ DEFAULT_STATE_DB_PATH = DEFAULT_CONFIG_DIR / "state.db"
 
 CONFIG_TEMPLATE = """\
 # datalab-beholder configuration
-datalab:
-  url: "https://datalab.example.org"
-  api_key: "your-api-key-here"  # or set DATALAB_API_KEY env var
+datalabs:
+  - name: "example"
+    url: "https://datalab.example.org"
+    api_key: "your-api-key-here"  # or set DATALAB_API_KEY env var
 
 watched_paths:
   - path: "/path/to/instrument/data"
     name: "Instrument-Name"
+    datalab: "example"
     include_patterns:
       - "*"
     exclude_patterns: []
@@ -50,13 +51,34 @@ log_level: "info"
 class WatchedPath(BaseModel):
     """A directory to monitor for file changes."""
 
-    path: Path
-    name: str
-    include_patterns: list[str] = ["*"]
-    exclude_patterns: list[str] = []
-    id_patterns: list[str] = []
-    item_type: str | None = None
-    max_depth: int | None = None
+    path: Path = Field(..., description="Path to watch for changes")
+    name: str = Field(..., description="Human-friendly name for this path")
+    include_patterns: list[str] = Field(
+        default_factory=lambda: ["*"],
+        description="List of unix glob patterns to include (default: ['*'])",
+    )
+    exclude_patterns: list[str] = Field(
+        default_factory=list,
+        description="List of unix glob patterns to exclude (default: [])",
+    )
+    id_patterns: list[str] = Field(
+        default_factory=list,
+        description=(
+            "List of regex patterns with named capture groups to extract IDs from file paths. "
+            f"Allowed group names: {sorted(ALLOWED_ID_GROUPS)}. These will be validated at "
+            "startup and used to populate metadata fields when posting to the datalab API."
+        ),
+    )
+    item_type: str | None = Field(
+        None, description="Optional item type to set when posting to the datalab API"
+    )
+    max_depth: int | None = Field(
+        10, description="Maximum directory depth to watch (default: 10)"
+    )
+    datalab: str | None = Field(
+        None,
+        description="Name of the datalab instance to post to (must match a datalab in the config)",
+    )
 
     @field_validator("path")
     @classmethod
@@ -95,10 +117,20 @@ class SyncConfig(BaseModel):
 
 
 class DatalabConfig(BaseModel):
-    """Connection details for the target datalab instance."""
+    """Connection details for the target datalab instances."""
 
-    url: str
-    api_key: str = ""
+    name: str = Field(
+        ...,
+        description="Unique name for this datalab instance (used to reference from WatchedPath)",
+    )
+    url: str = Field(
+        ...,
+        description="Base URL of the datalab instance, e.g. https://datalab.example.org",
+    )
+    api_key: str = Field(
+        ...,
+        description="API key for authenticating to the datalab instance (or set <PREFIX>_DATALAB_API_KEY env var)",
+    )
 
     @field_validator("api_key", mode="before")
     @classmethod
@@ -114,7 +146,10 @@ class DatalabConfig(BaseModel):
 class BeholderConfig(BaseModel):
     """Top-level configuration for the beholder daemon."""
 
-    datalab: DatalabConfig
+    datalabs: list[DatalabConfig] = Field(
+        ...,
+        description="List of datalab instances to post to; multiple versions of the same datalab can be included with different names for different paths or users",
+    )
     watched_paths: list[WatchedPath]
     sync: SyncConfig = SyncConfig()
     log_level: str = "info"
