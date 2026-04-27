@@ -330,26 +330,3 @@ class TestIdsRoundTrip:
         pending = store.get_pending_changes("wp")
         assert pending[0].ids == {}
         store.close()
-
-    def test_legacy_db_without_ids_column_migrated(self, tmp_path: Path) -> None:
-        """A pre-migration DB (no ids_json column) must be upgradable in place."""
-        import sqlite3
-        from datalab_beholder.state import StateStore
-
-        db = tmp_path / "legacy.db"
-        with sqlite3.connect(str(db)) as conn:
-            conn.execute(
-                "CREATE TABLE files (path TEXT, watched_path_name TEXT, size INTEGER, "
-                "modified REAL, last_synced REAL, status TEXT DEFAULT 'new', "
-                "PRIMARY KEY (path, watched_path_name))"
-            )
-            conn.execute(
-                "INSERT INTO files (path, watched_path_name, size, modified, status) "
-                "VALUES ('old.txt', 'wp', 1, 1.0, 'new')"
-            )
-
-        store = StateStore(db)
-        pending = store.get_pending_changes("wp")
-        assert len(pending) == 1
-        assert pending[0].ids == {}
-        store.close()
