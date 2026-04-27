@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from datalab_beholder.scanner import scan_directory
 
 
@@ -29,8 +31,17 @@ class TestScanDirectory:
         assert "subdir/deep/file4.dat" in paths
         assert "temp/scratch.tmp" in paths
 
-    def test_finds_directories(self, tmp_tree: Path) -> None:
-        result = scan_directory(tmp_tree)
+    def test_skip_dirs_true_omits_directory_entries(self, tmp_tree: Path) -> None:
+        result = scan_directory(tmp_tree, skip_dirs=True)
+
+        dirs = {e.path for e in result.entries if e.is_directory}
+        assert dirs == set()
+        # Directories are still recursed into and counted in statistics.
+        assert result.total_directories > 0
+        assert "subdir/file3.csv" in {e.path for e in result.entries}
+
+    def test_skip_dirs_false_includes_directory_entries(self, tmp_tree: Path) -> None:
+        result = scan_directory(tmp_tree, skip_dirs=False)
 
         dirs = {e.path for e in result.entries if e.is_directory}
         assert "subdir" in dirs
@@ -123,3 +134,57 @@ class TestScanDirectory:
     def test_default_name(self, tmp_tree: Path) -> None:
         result = scan_directory(tmp_tree)
         assert result.name == tmp_tree.name
+
+
+class TestIdPatterns:
+    @pytest.fixture
+    def digibat_tree(self, tmp_path: Path) -> Path:
+        """Mirror of tests/examples/digibat layout."""
+        root = tmp_path / "digibat"
+        (root / "P011").mkdir(parents=True)
+        (root / "P011" / "1111_test.mpr").write_text("data")
+        (root / "P011" / "test.mpr").write_text("no id prefix")
+        (root / "P012" / "subdir").mkdir(parents=True)
+        (root / "P012" / "subdir" / "2222-x.mpr").write_text("nested")
+        (root / "xyz").mkdir()
+        (root / "xyz" / "1111-test.mpr").write_text("wrong project dir")
+        return root
+
+    def test_id_patterns_extract_named_groups(self, digibat_tree: Path) -> None:
+        result = scan_directory(
+            digibat_tree,
+            include_patterns=["*.mpr"],
+            id_patterns=[r"^(?P<group_id>P[0-9]{3,4})/(?P<item_id>[0-9]+)[-_].*\.mpr$"],
+        )
+
+        by_path = {e.path: e for e in result.entries}
+        assert "P011/1111_test.mpr" in by_path
+        assert by_path["P011/1111_test.mpr"].ids == {
+            "group_id": "P011",
+            "item_id": "1111",
+        }
+
+        # Files that don't match the pattern are skipped.
+        assert "P011/test.mpr" not in by_path
+        assert "xyz/1111-test.mpr" not in by_path
+        # Top-level-anchored regex should not match nested project files.
+        assert "P012/subdir/2222-x.mpr" not in by_path
+
+    def test_empty_id_patterns_passes_everything(self, digibat_tree: Path) -> None:
+        result = scan_directory(digibat_tree, include_patterns=["*.mpr"])
+
+        paths = {e.path for e in result.entries}
+        assert "P011/1111_test.mpr" in paths
+        assert "P011/test.mpr" in paths
+        assert "xyz/1111-test.mpr" in paths
+        assert all(e.ids == {} for e in result.entries)
+
+    def test_id_patterns_serialised_in_to_dict(self, digibat_tree: Path) -> None:
+        result = scan_directory(
+            digibat_tree,
+            include_patterns=["*.mpr"],
+            id_patterns=[r"^(?P<group_id>P[0-9]{3,4})/(?P<item_id>[0-9]+)[-_].*\.mpr$"],
+        )
+        d = result.to_dict()
+        match = next(e for e in d["entries"] if e["path"] == "P011/1111_test.mpr")
+        assert match["ids"] == {"group_id": "P011", "item_id": "1111"}
