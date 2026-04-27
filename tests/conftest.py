@@ -54,7 +54,13 @@ def tmp_tree(tmp_path: Path) -> Path:
 def sample_config(tmp_path: Path, tmp_tree: Path) -> BeholderConfig:
     """Create a sample BeholderConfig for testing."""
     return BeholderConfig(
-        datalab={"url": "https://test.example.org", "api_key": "test-key-123"},
+        datalabs=[
+            {
+                "name": "test",
+                "url": "https://test.example.org",
+                "api_key": "test-key-123",
+            }
+        ],
         watched_paths=[
             {
                 "path": str(tmp_tree),

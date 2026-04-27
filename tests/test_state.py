@@ -269,3 +269,87 @@ class TestStateStore:
         pending = store.get_pending_changes("test")
         assert "notes.txt" not in {e.path for e in pending}
         store.close()
+
+
+class TestIdsRoundTrip:
+    def test_ids_persisted_through_scan(self, tmp_path: Path) -> None:
+        from datalab_beholder.scanner import FileEntry, ScanResult
+        from datalab_beholder.state import StateStore
+        from datetime import datetime, timezone
+
+        store = StateStore(tmp_path / "s.db")
+        scan = ScanResult(
+            root_path="/x",
+            name="wp",
+            timestamp=datetime.now(timezone.utc),
+            entries=[
+                FileEntry(
+                    path="P011/1111_test.mpr",
+                    size=10,
+                    modified=1.0,
+                    is_directory=False,
+                    ids={"group_id": "P011", "item_id": "1111"},
+                ),
+                FileEntry(
+                    path="P012/2222_x.mpr",
+                    size=20,
+                    modified=2.0,
+                    is_directory=False,
+                    ids={"item_id": "2222"},
+                ),
+            ],
+        )
+        diff = store.update_from_scan(scan)
+        assert {e.path: e.ids for e in diff.new} == {
+            "P011/1111_test.mpr": {"group_id": "P011", "item_id": "1111"},
+            "P012/2222_x.mpr": {"item_id": "2222"},
+        }
+
+        pending = store.get_pending_changes("wp")
+        assert {e.path: e.ids for e in pending} == {
+            "P011/1111_test.mpr": {"group_id": "P011", "item_id": "1111"},
+            "P012/2222_x.mpr": {"item_id": "2222"},
+        }
+        store.close()
+
+    def test_ids_default_to_empty_dict(self, tmp_path: Path) -> None:
+        from datalab_beholder.scanner import FileEntry, ScanResult
+        from datalab_beholder.state import StateStore
+        from datetime import datetime, timezone
+
+        store = StateStore(tmp_path / "s.db")
+        scan = ScanResult(
+            root_path="/x",
+            name="wp",
+            timestamp=datetime.now(timezone.utc),
+            entries=[
+                FileEntry(path="a.txt", size=1, modified=1.0, is_directory=False),
+            ],
+        )
+        store.update_from_scan(scan)
+        pending = store.get_pending_changes("wp")
+        assert pending[0].ids == {}
+        store.close()
+
+    def test_legacy_db_without_ids_column_migrated(self, tmp_path: Path) -> None:
+        """A pre-migration DB (no ids_json column) must be upgradable in place."""
+        import sqlite3
+        from datalab_beholder.state import StateStore
+
+        db = tmp_path / "legacy.db"
+        with sqlite3.connect(str(db)) as conn:
+            conn.execute(
+                "CREATE TABLE files (path TEXT, watched_path_name TEXT, size INTEGER, "
+                "modified REAL, last_synced REAL, status TEXT DEFAULT 'new', "
+                "PRIMARY KEY (path, watched_path_name))"
+            )
+            conn.execute(
+                "INSERT INTO files (path, watched_path_name, size, modified, status) "
+                "VALUES ('old.txt', 'wp', 1, 1.0, 'new')"
+            )
+
+        store = StateStore(db)
+        pending = store.get_pending_changes("wp")
+        assert len(pending) == 1
+        assert pending[0].ids == {}
+        store.close()

@@ -14,7 +14,13 @@ from tests.conftest import MockTransport, _make_beholder_client
 class TestBeholderDaemon:
     def _make_config(self, tmp_path: Path, tmp_tree: Path) -> BeholderConfig:
         return BeholderConfig(
-            datalab={"url": "https://test.example.org", "api_key": "test-key"},
+            datalabs=[
+                {
+                    "name": "test",
+                    "url": "https://test.example.org",
+                    "api_key": "test-key",
+                }
+            ],
             watched_paths=[
                 {
                     "path": str(tmp_tree),
@@ -34,7 +40,9 @@ class TestBeholderDaemon:
         from datalab_beholder.state import StateStore
 
         daemon._state = StateStore(config.state_db)
-        daemon._client = _make_beholder_client(mock_transport, monkeypatch)
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        daemon._clients = {d.name: client for d in config.datalabs}
+        daemon._clients_by_wp = {wp.name: client for wp in config.watched_paths}
         daemon._daemon_id = daemon._build_daemon_id()
         daemon._watcher = None
 
@@ -73,7 +81,13 @@ class TestBeholderDaemon:
     ) -> None:
         """Initial scan should handle watched paths that don't exist."""
         config = BeholderConfig(
-            datalab={"url": "https://test.example.org", "api_key": "test-key"},
+            datalabs=[
+                {
+                    "name": "test",
+                    "url": "https://test.example.org",
+                    "api_key": "test-key",
+                }
+            ],
             watched_paths=[
                 {
                     "path": str(tmp_path / "nonexistent"),
@@ -328,7 +342,87 @@ class TestBeholderDaemon:
         daemon = self._make_daemon(config, transport, monkeypatch)
 
         assert daemon.config is config
-        assert daemon.client is daemon._client
+        assert daemon.client is daemon._clients_by_wp["test-data"]
 
         daemon.setup()
         daemon.shutdown()
+
+
+class TestMultiDatalabRouting:
+    def test_clients_by_wp_routes_per_watched_path(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from datalab_beholder.config import BeholderConfig
+        from datalab_beholder.daemon import BeholderDaemon
+
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+
+        config = BeholderConfig(
+            datalabs=[
+                {"name": "north", "url": "https://north.example.org", "api_key": "k1"},
+                {"name": "south", "url": "https://south.example.org", "api_key": "k2"},
+            ],
+            watched_paths=[
+                {"path": str(tmp_path / "a"), "name": "wp-a", "datalab": "north"},
+                {"path": str(tmp_path / "b"), "name": "wp-b", "datalab": "south"},
+            ],
+            state_db=tmp_path / "state.db",
+        )
+
+        # Stub BeholderClient so __init__ doesn't try to connect.
+        from datalab_beholder import client as client_module
+
+        constructed: list[str] = []
+
+        class FakeClient:
+            def __init__(self, datalab_api_url: str, log_level: str) -> None:
+                self.datalab_api_url = datalab_api_url
+                constructed.append(datalab_api_url)
+
+        monkeypatch.setattr(client_module, "BeholderClient", FakeClient)
+        # daemon.py imported the symbol directly, patch there too
+        from datalab_beholder import daemon as daemon_module
+
+        monkeypatch.setattr(daemon_module, "BeholderClient", FakeClient)
+
+        daemon = BeholderDaemon(config)
+
+        assert set(daemon._clients) == {"north", "south"}
+        assert (
+            daemon._clients_by_wp["wp-a"].datalab_api_url == "https://north.example.org"
+        )
+        assert (
+            daemon._clients_by_wp["wp-b"].datalab_api_url == "https://south.example.org"
+        )
+        # Each datalab built exactly once.
+        assert sorted(constructed) == [
+            "https://north.example.org",
+            "https://south.example.org",
+        ]
+
+    def test_attach_runs_after_push_in_tick(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Attach hook must fire after metadata push, both inside the same tick window."""
+        from unittest.mock import MagicMock
+
+        helper = TestBeholderDaemon()
+        config = helper._make_config(tmp_path, tmp_tree)
+        transport = MockTransport()
+        daemon = helper._make_daemon(config, transport, monkeypatch)
+        daemon._watcher = None
+        daemon._last_push_mono = 0.0
+        daemon._last_poll_mono = float("inf")  # skip poll branch
+
+        order: list[str] = []
+        daemon._push_pending_changes = MagicMock(
+            side_effect=lambda: order.append("push")
+        )
+        daemon._attach_matched_files = MagicMock(
+            side_effect=lambda: order.append("attach")
+        )
+
+        daemon.tick()
+
+        assert order == ["push", "attach"]

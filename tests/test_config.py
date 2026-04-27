@@ -7,7 +7,12 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from datalab_beholder.config import ALLOWED_ID_GROUPS, WatchedPath
+from datalab_beholder.config import (
+    ALLOWED_ID_GROUPS,
+    BeholderConfig,
+    DatalabConfig,
+    WatchedPath,
+)
 
 
 def _make(id_patterns: list[str], tmp_path: Path) -> WatchedPath:
@@ -172,3 +177,134 @@ class TestComplexPatternsAtScanTime:
         )
         ids = result.entries[0].ids
         assert ids == {"item_id": "100"}
+
+
+def _wp(name: str, path: Path, datalab: str | None = None) -> dict:
+    out = {"path": str(path), "name": name}
+    if datalab is not None:
+        out["datalab"] = datalab
+    return out
+
+
+def _dl(name: str, key: str = "k") -> dict:
+    return {"name": name, "url": f"https://{name}.example.org", "api_key": key}
+
+
+class TestItemIdRequirement:
+    def test_pattern_without_item_id_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as exc:
+            _make([r"(?P<group_id>P\d+)"], tmp_path)
+        assert "item_id" in str(exc.value)
+
+    def test_item_id_with_optional_others_accepted(self, tmp_path: Path) -> None:
+        wp = _make(
+            [
+                r"(?P<group_id>P\d+)/(?P<item_id>\d+)",
+                r"(?P<collection_id>C\d+)/(?P<item_id>\d+)",
+            ],
+            tmp_path,
+        )
+        assert len(wp.id_patterns) == 2
+
+    def test_one_pattern_missing_item_id_rejects_whole_list(
+        self, tmp_path: Path
+    ) -> None:
+        with pytest.raises(ValidationError):
+            _make(
+                [
+                    r"(?P<item_id>\d+)\.mpr",
+                    r"(?P<group_id>P\d+)\.dat",
+                ],
+                tmp_path,
+            )
+
+
+class TestDatalabRefValidation:
+    def test_unknown_datalab_ref_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as exc:
+            BeholderConfig(
+                datalabs=[_dl("real")],
+                watched_paths=[_wp("wp1", tmp_path, datalab="ghost")],
+                state_db=tmp_path / "s.db",
+            )
+        msg = str(exc.value)
+        assert "wp1" in msg
+        assert "ghost" in msg
+        assert "real" in msg
+
+    def test_single_datalab_assigned_when_omitted(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("only")],
+            watched_paths=[_wp("wp1", tmp_path)],
+            state_db=tmp_path / "s.db",
+        )
+        assert cfg.watched_paths[0].datalab == "only"
+
+    def test_multi_datalab_requires_explicit_choice(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as exc:
+            BeholderConfig(
+                datalabs=[_dl("a"), _dl("b")],
+                watched_paths=[_wp("wp1", tmp_path)],
+                state_db=tmp_path / "s.db",
+            )
+        assert "wp1" in str(exc.value)
+
+    def test_duplicate_datalab_names_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as exc:
+            BeholderConfig(
+                datalabs=[_dl("a"), _dl("a")],
+                watched_paths=[_wp("wp1", tmp_path, datalab="a")],
+                state_db=tmp_path / "s.db",
+            )
+        assert (
+            "unique" in str(exc.value).lower() or "duplicate" in str(exc.value).lower()
+        )
+
+    def test_empty_datalabs_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            BeholderConfig(
+                datalabs=[],
+                watched_paths=[_wp("wp1", tmp_path)],
+                state_db=tmp_path / "s.db",
+            )
+
+    def test_each_wp_routes_to_its_named_datalab(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("a"), _dl("b")],
+            watched_paths=[
+                _wp("wp1", tmp_path, datalab="a"),
+                _wp("wp2", tmp_path, datalab="b"),
+            ],
+            state_db=tmp_path / "s.db",
+        )
+        assert cfg.watched_paths[0].datalab == "a"
+        assert cfg.watched_paths[1].datalab == "b"
+
+
+class TestApiKeyResolution:
+    def test_per_instance_env_var_wins(self, monkeypatch) -> None:
+        monkeypatch.setenv("FOO_DATALAB_API_KEY", "from-foo")
+        monkeypatch.setenv("DATALAB_API_KEY", "from-shared")
+        d = DatalabConfig(name="foo", url="https://x.example.org", api_key="")
+        assert d.api_key == "from-foo"
+
+    def test_shared_env_var_fallback(self, monkeypatch) -> None:
+        monkeypatch.delenv("BAR_DATALAB_API_KEY", raising=False)
+        monkeypatch.setenv("DATALAB_API_KEY", "shared")
+        d = DatalabConfig(name="bar", url="https://x.example.org", api_key="")
+        assert d.api_key == "shared"
+
+    def test_yaml_literal_kept_when_no_env(self, monkeypatch) -> None:
+        monkeypatch.delenv("BAZ_DATALAB_API_KEY", raising=False)
+        monkeypatch.delenv("DATALAB_API_KEY", raising=False)
+        d = DatalabConfig(
+            name="baz", url="https://x.example.org", api_key="literal-key"
+        )
+        assert d.api_key == "literal-key"
+
+    def test_placeholder_treated_as_empty(self, monkeypatch) -> None:
+        monkeypatch.setenv("QUX_DATALAB_API_KEY", "from-env")
+        d = DatalabConfig(
+            name="qux", url="https://x.example.org", api_key="your-api-key-here"
+        )
+        assert d.api_key == "from-env"

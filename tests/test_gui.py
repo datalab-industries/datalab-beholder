@@ -21,10 +21,13 @@ def config_file(tmp_path: Path, tmp_tree: Path) -> Path:
     import yaml
 
     config_dict = {
-        "datalab": {
-            "url": "https://test.example.org",
-            "api_key": "test-key",
-        },
+        "datalabs": [
+            {
+                "name": "test",
+                "url": "https://test.example.org",
+                "api_key": "test-key",
+            }
+        ],
         "watched_paths": [
             {"path": str(tmp_tree), "name": "test-data"},
         ],
