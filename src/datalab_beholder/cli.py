@@ -55,24 +55,49 @@ def init(path: Path | None) -> None:
 )
 @click.option("--max-depth", type=int, default=None, help="Maximum recursion depth.")
 @click.option("--pretty", is_flag=True, help="Pretty-print JSON output.")
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Path to config file. Default: config.yaml alongside the package/executable",
+)
 def scan(
     path: Path,
     name: str,
     include: tuple[str, ...],
     exclude: tuple[str, ...],
     max_depth: int | None,
+    config_path: Path | None,
     pretty: bool,
 ) -> None:
     """Scan a directory and output structured JSON."""
     from datalab_beholder.scanner import scan_directory
+    from datalab_beholder.config import load_config
 
-    result = scan_directory(
-        root=path,
-        name=name,
-        include_patterns=list(include),
-        exclude_patterns=list(exclude),
-        max_depth=max_depth,
-    )
+    config = None
+
+    if config_path:
+        config = load_config(config_path)
+
+    if config:
+        for d in config.watched_paths:
+            result = scan_directory(
+                root=d.path,
+                name=d.name,
+                include_patterns=d.include_patterns,
+                exclude_patterns=d.exclude_patterns,
+                id_patterns=d.id_patterns,
+                max_depth=d.max_depth,
+            )
+    else:
+        result = scan_directory(
+            root=path,
+            name=name,
+            include_patterns=list(include),
+            exclude_patterns=list(exclude),
+            max_depth=max_depth,
+        )
 
     indent = 2 if pretty else None
     click.echo(json.dumps(result.to_dict(), indent=indent))
