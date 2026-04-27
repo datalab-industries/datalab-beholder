@@ -7,7 +7,7 @@ import re
 import sys
 from pathlib import Path
 import yaml
-from pydantic import BaseModel, field_validator, Field
+from pydantic import BaseModel, field_validator, model_validator, Field
 
 # Controlled vocabulary of named capture groups allowed in id_patterns.
 # These names are the only ones the rest of the daemon knows how to
@@ -106,6 +106,12 @@ class WatchedPath(BaseModel):
                     f"id_pattern {pattern!r} contains unsupported capture "
                     f"groups {sorted(unknown)}; allowed: {sorted(ALLOWED_ID_GROUPS)}"
                 )
+            if "item_id" not in group_names:
+                raise ValueError(
+                    f"id_pattern {pattern!r} must include a named capture "
+                    f"group called 'item_id' (the daemon uses it to attach "
+                    f"files to datalab items)"
+                )
         return v
 
 
@@ -132,15 +138,17 @@ class DatalabConfig(BaseModel):
         description="API key for authenticating to the datalab instance (or set <PREFIX>_DATALAB_API_KEY env var)",
     )
 
-    @field_validator("api_key", mode="before")
-    @classmethod
-    def resolve_api_key(cls, v: str) -> str:
-        if not v or v == "your-api-key-here":
-            env_key = os.environ.get("DATALAB_API_KEY", "")
-            if env_key:
-                return env_key.strip("'").strip('"')
-            return v
-        return v
+    @model_validator(mode="after")
+    def resolve_api_key(self) -> DatalabConfig:
+        if self.api_key and self.api_key != "your-api-key-here":
+            return self
+        # Per-instance env var takes precedence; fall back to the shared one.
+        per_instance = os.environ.get(f"{self.name.upper()}_DATALAB_API_KEY", "")
+        shared = os.environ.get("DATALAB_API_KEY", "")
+        resolved = per_instance or shared
+        if resolved:
+            self.api_key = resolved.strip("'").strip('"')
+        return self
 
 
 class BeholderConfig(BaseModel):
@@ -159,6 +167,35 @@ class BeholderConfig(BaseModel):
     @classmethod
     def expand_state_db(cls, v: Path) -> Path:
         return Path(os.path.expanduser(v)).resolve()
+
+    @model_validator(mode="after")
+    def validate_datalab_refs(self) -> BeholderConfig:
+        if not self.datalabs:
+            raise ValueError("at least one datalab instance must be configured")
+
+        names = [d.name for d in self.datalabs]
+        duplicates = {n for n in names if names.count(n) > 1}
+        if duplicates:
+            raise ValueError(
+                f"datalab names must be unique; duplicates: {sorted(duplicates)}"
+            )
+
+        valid = set(names)
+        for wp in self.watched_paths:
+            if wp.datalab is None:
+                if len(self.datalabs) == 1:
+                    wp.datalab = self.datalabs[0].name
+                else:
+                    raise ValueError(
+                        f"watched_path {wp.name!r} must specify a datalab "
+                        f"(multiple configured: {sorted(valid)})"
+                    )
+            elif wp.datalab not in valid:
+                raise ValueError(
+                    f"watched_path {wp.name!r} references unknown datalab "
+                    f"{wp.datalab!r}; configured: {sorted(valid)}"
+                )
+        return self
 
 
 def load_config(path: Path | None = None) -> BeholderConfig:
