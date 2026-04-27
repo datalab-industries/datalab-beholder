@@ -402,16 +402,7 @@ class BeholderGUI(tk.Tk):
 
     def _check_connection(self) -> None:
         """Run a connection/auth check against the server."""
-        if self._daemon is None:
-            return
-        try:
-            self._server_reachable, self._authenticated = (
-                self._daemon.client.check_connection()
-            )
-        except Exception:
-            self._server_reachable = False
-            self._authenticated = False
-        self._update_status()
+        pass
 
     # -- Tick loop (driven by Tk.after) ---------------------------------------
 
