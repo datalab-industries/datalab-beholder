@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,7 @@ CREATE TABLE IF NOT EXISTS files (
     modified REAL,
     last_synced REAL,
     status TEXT DEFAULT 'new',
+    ids_json TEXT DEFAULT '{}',
     PRIMARY KEY (path, watched_path_name)
 );
 
@@ -40,6 +42,7 @@ class DiffEntry:
     modified: float
     is_directory: bool
     status: str  # "new", "modified", "deleted"
+    ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -101,7 +104,8 @@ class StateStore:
 
         # Get existing entries for this watched path
         cursor = self._conn.execute(
-            "SELECT path, size, modified, status FROM files WHERE watched_path_name = ?",
+            "SELECT path, size, modified, status, ids_json FROM files "
+            "WHERE watched_path_name = ?",
             (watched_name,),
         )
         existing = {row["path"]: dict(row) for row in cursor}
@@ -113,6 +117,8 @@ class StateStore:
             seen_paths.add(entry.path)
             prev = existing.get(entry.path)
 
+            ids_json = json.dumps(entry.ids)
+
             if prev is None:
                 # New file
                 diff.new.append(
@@ -122,12 +128,13 @@ class StateStore:
                         modified=entry.modified,
                         is_directory=entry.is_directory,
                         status="new",
+                        ids=dict(entry.ids),
                     )
                 )
                 self._conn.execute(
-                    "INSERT INTO files (path, watched_path_name, size, modified, status) "
-                    "VALUES (?, ?, ?, ?, 'new')",
-                    (entry.path, watched_name, entry.size, entry.modified),
+                    "INSERT INTO files (path, watched_path_name, size, modified, status, ids_json) "
+                    "VALUES (?, ?, ?, ?, 'new', ?)",
+                    (entry.path, watched_name, entry.size, entry.modified, ids_json),
                 )
             elif prev["size"] != entry.size or prev["modified"] != entry.modified:
                 # Modified file
@@ -138,12 +145,13 @@ class StateStore:
                         modified=entry.modified,
                         is_directory=entry.is_directory,
                         status="modified",
+                        ids=dict(entry.ids),
                     )
                 )
                 self._conn.execute(
-                    "UPDATE files SET size = ?, modified = ?, status = 'modified' "
+                    "UPDATE files SET size = ?, modified = ?, status = 'modified', ids_json = ? "
                     "WHERE path = ? AND watched_path_name = ?",
-                    (entry.size, entry.modified, entry.path, watched_name),
+                    (entry.size, entry.modified, ids_json, entry.path, watched_name),
                 )
             else:
                 diff.unchanged += 1
@@ -158,6 +166,7 @@ class StateStore:
                         modified=data["modified"],
                         is_directory=False,
                         status="deleted",
+                        ids=json.loads(data.get("ids_json") or "{}"),
                     )
                 )
                 self._conn.execute(
@@ -182,19 +191,33 @@ class StateStore:
                 (entry.path, watched_path_name),
             ).fetchone()
 
+            ids_json = json.dumps(entry.ids)
+
             if existing is None:
                 self._conn.execute(
-                    "INSERT INTO files (path, watched_path_name, size, modified, status) "
-                    "VALUES (?, ?, ?, ?, 'new')",
-                    (entry.path, watched_path_name, entry.size, entry.modified),
+                    "INSERT INTO files (path, watched_path_name, size, modified, status, ids_json) "
+                    "VALUES (?, ?, ?, ?, 'new', ?)",
+                    (
+                        entry.path,
+                        watched_path_name,
+                        entry.size,
+                        entry.modified,
+                        ids_json,
+                    ),
                 )
             elif (
                 existing["size"] != entry.size or existing["modified"] != entry.modified
             ):
                 self._conn.execute(
-                    "UPDATE files SET size = ?, modified = ?, status = 'modified' "
+                    "UPDATE files SET size = ?, modified = ?, status = 'modified', ids_json = ? "
                     "WHERE path = ? AND watched_path_name = ?",
-                    (entry.size, entry.modified, entry.path, watched_path_name),
+                    (
+                        entry.size,
+                        entry.modified,
+                        ids_json,
+                        entry.path,
+                        watched_path_name,
+                    ),
                 )
         self._conn.commit()
 
@@ -250,7 +273,7 @@ class StateStore:
             List of DiffEntry objects with pending changes.
         """
         cursor = self._conn.execute(
-            "SELECT path, size, modified, status FROM files "
+            "SELECT path, size, modified, status, ids_json FROM files "
             "WHERE watched_path_name = ? AND status != 'synced'",
             (watched_path_name,),
         )
@@ -261,6 +284,7 @@ class StateStore:
                 modified=row["modified"],
                 is_directory=False,
                 status=row["status"],
+                ids=json.loads(row["ids_json"] or "{}"),
             )
             for row in cursor
         ]
