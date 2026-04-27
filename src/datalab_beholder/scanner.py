@@ -22,6 +22,7 @@ class FileEntry:
     size: int
     modified: float
     is_directory: bool
+    ids: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -49,6 +50,7 @@ class ScanResult:
                     "size": e.size,
                     "modified": e.modified,
                     "is_directory": e.is_directory,
+                    "ids": e.ids,
                 }
                 for e in self.entries
             ],
@@ -66,9 +68,21 @@ def _matches_any(name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(name, p) for p in patterns if p)
 
 
-def _matches_regex(name: str, patterns: list[str]) -> bool:
-    """Check if a filename matches any of the given regex patterns."""
-    return any(re.search(p, name) for p in patterns if p)
+def _match_id_patterns(
+    path: str, patterns: list[re.Pattern[str]]
+) -> dict[str, str] | None:
+    """Match a path against ID-extraction regexes.
+
+    Returns the named-group dict from the first matching pattern, an empty
+    dict if patterns is empty (no constraint), or None if no pattern matched.
+    """
+    if not patterns:
+        return {}
+    for pat in patterns:
+        m = pat.search(path)
+        if m:
+            return {k: v for k, v in m.groupdict().items() if v is not None}
+    return None
 
 
 def scan_directory(
@@ -78,7 +92,7 @@ def scan_directory(
     exclude_patterns: list[str] | None = None,
     id_patterns: list[str] | None = None,
     max_depth: int | None = None,
-    skip_dirs: bool = False,
+    skip_dirs: bool = True,
 ) -> ScanResult:
     """Scan a directory tree and return structured metadata.
 
@@ -102,6 +116,8 @@ def scan_directory(
         exclude_patterns = []
     if id_patterns is None:
         id_patterns = []
+
+    compiled_id_patterns = [re.compile(p) for p in id_patterns if p]
 
     root = Path(root).resolve()
     if not name:
@@ -159,7 +175,8 @@ def scan_directory(
                     if not _matches_any(entry_name, include_patterns):
                         continue
 
-                    if id_patterns and not _matches_regex(entry_name, id_patterns):
+                    ids = _match_id_patterns(rel_path, compiled_id_patterns)
+                    if ids is None:
                         log.debug(
                             "File %s does not match ID patterns %s, skipping",
                             entry.path,
@@ -175,6 +192,7 @@ def scan_directory(
                             size=stat.st_size,
                             modified=stat.st_mtime,
                             is_directory=False,
+                            ids=ids,
                         )
                     )
 

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 import yaml
 from pydantic import BaseModel, field_validator
+
+# Controlled vocabulary of named capture groups allowed in id_patterns.
+# These names are the only ones the rest of the daemon knows how to
+# interpret when posting to the datalab API.
+ALLOWED_ID_GROUPS: frozenset[str] = frozenset({"group_id", "item_id", "collection_id"})
 
 if getattr(sys, "frozen", False):
     # PyInstaller bundle: config lives next to the executable
@@ -49,12 +55,36 @@ class WatchedPath(BaseModel):
     include_patterns: list[str] = ["*"]
     exclude_patterns: list[str] = []
     id_patterns: list[str] = []
+    item_type: str | None = None
     max_depth: int | None = None
 
     @field_validator("path")
     @classmethod
     def expand_path(cls, v: Path) -> Path:
         return Path(os.path.expanduser(v)).resolve()
+
+    @field_validator("id_patterns")
+    @classmethod
+    def validate_id_patterns(cls, v: list[str]) -> list[str]:
+        for pattern in v:
+            try:
+                compiled = re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"Invalid regex {pattern!r}: {e}") from e
+
+            group_names = set(compiled.groupindex)
+            if not group_names:
+                raise ValueError(
+                    f"id_pattern {pattern!r} has no named capture groups; "
+                    f"expected at least one of {sorted(ALLOWED_ID_GROUPS)}"
+                )
+            unknown = group_names - ALLOWED_ID_GROUPS
+            if unknown:
+                raise ValueError(
+                    f"id_pattern {pattern!r} contains unsupported capture "
+                    f"groups {sorted(unknown)}; allowed: {sorted(ALLOWED_ID_GROUPS)}"
+                )
+        return v
 
 
 class SyncConfig(BaseModel):
