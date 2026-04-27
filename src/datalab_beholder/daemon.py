@@ -43,13 +43,16 @@ class BeholderDaemon:
         self._running = False
         self._state = StateStore(config.state_db)
 
-        # BaseDatalabClient reads the API key from env vars
-        if config.datalab.api_key:
-            os.environ["DATALAB_API_KEY"] = config.datalab.api_key
-        self._client = BeholderClient(
-            datalab_api_url=config.datalab.url,
-            log_level=config.log_level,
-        )
+        self._clients: dict[str, BeholderClient] = self._build_clients(config)
+        # Routing table: each watched path resolves to exactly one client.
+        # Cross-field validation in BeholderConfig guarantees wp.datalab is set
+        # and references a real datalab name.
+        self._clients_by_wp: dict[str, BeholderClient] = {
+            wp.name: self._clients[wp.datalab]
+            for wp in config.watched_paths
+            if wp.datalab
+        }
+
         self._daemon_id = self._build_daemon_id()
         self._watcher: DirectoryWatcher | None = None
 
@@ -64,10 +67,35 @@ class BeholderDaemon:
         """The daemon's configuration."""
         return self._config
 
-    @property
-    def client(self) -> BeholderClient:
-        """The daemon's HTTP client."""
-        return self._client
+    def _client_for(self, wp: Any) -> BeholderClient:
+        """Return the BeholderClient that owns ``wp``."""
+        return self._clients_by_wp[wp.name]
+
+    @staticmethod
+    def _build_clients(config: BeholderConfig) -> dict[str, BeholderClient]:
+        """Construct one BeholderClient per configured datalab.
+
+        BaseDatalabClient currently only reads the API key from the
+        DATALAB_API_KEY env var, so we mutate the env immediately before each
+        client construction. This will go away once BaseDatalabClient accepts
+        an explicit key.
+        """
+        previous = os.environ.get("DATALAB_API_KEY")
+        clients: dict[str, BeholderClient] = {}
+        try:
+            for d in config.datalabs:
+                if d.api_key:
+                    os.environ["DATALAB_API_KEY"] = d.api_key
+                clients[d.name] = BeholderClient(
+                    datalab_api_url=d.url,
+                    log_level=config.log_level,
+                )
+        finally:
+            if previous is None:
+                os.environ.pop("DATALAB_API_KEY", None)
+            else:
+                os.environ["DATALAB_API_KEY"] = previous
+        return clients
 
     def _build_daemon_id(self) -> str:
         """Build a daemon ID from watched path names."""
@@ -139,6 +167,7 @@ class BeholderDaemon:
             self.sync_status = "pushing"
             try:
                 self._push_pending_changes()
+                self._attach_matched_files()
                 self.last_push_time = time.time()
                 self.sync_status = "idle"
             except Exception:
@@ -226,7 +255,7 @@ class BeholderDaemon:
             log.debug("No changes for %s", wp.name)
             return
 
-        self._push_diff(wp.name, diff)
+        self._push_diff(wp, diff)
 
     def _push_pending_changes(self) -> None:
         """Read accumulated changes from state and push to the server."""
@@ -249,7 +278,7 @@ class BeholderDaemon:
                     for e in pending
                 ]
 
-                success = self._client.push_metadata(
+                success = self._client_for(wp).push_metadata(
                     daemon_id=self._daemon_id,
                     entries=entries,
                     snapshot_type="diff",
@@ -271,8 +300,9 @@ class BeholderDaemon:
             except Exception:
                 log.exception("Error pushing changes for %s", wp.name)
 
-    def _push_diff(self, watched_path_name: str, diff: Any) -> None:
+    def _push_diff(self, wp: Any, diff: Any) -> None:
         """Push a diff result to the server."""
+        watched_path_name = wp.name
         entries = [
             {
                 "path": e.path,
@@ -292,7 +322,7 @@ class BeholderDaemon:
             len(diff.deleted),
         )
 
-        success = self._client.push_metadata(
+        success = self._client_for(wp).push_metadata(
             daemon_id=self._daemon_id,
             entries=entries,
             snapshot_type=diff.snapshot_type,
@@ -314,28 +344,31 @@ class BeholderDaemon:
             log.warning("Failed to sync metadata for %s, will retry", watched_path_name)
 
     def _poll_file_requests(self) -> None:
-        """Check for pending file requests and upload them."""
-        requests = self._client.poll_file_requests(self._daemon_id)
-        if not requests:
-            return
-
-        log.info("Received %d file request(s)", len(requests))
-
-        for req in requests:
+        """Check every configured datalab for pending file requests."""
+        for datalab_name, client in self._clients.items():
             try:
-                self._handle_file_request(req)
+                requests = client.poll_file_requests(self._daemon_id)
             except Exception:
-                log.exception("Error handling file request %s", req.request_id)
+                log.exception("Error polling file requests from %s", datalab_name)
+                continue
+            if not requests:
+                continue
 
-    def _handle_file_request(self, req: Any) -> None:
-        """Find and upload a requested file."""
-        # Find the file across all watched paths
+            log.info("Received %d file request(s) from %s", len(requests), datalab_name)
+            for req in requests:
+                try:
+                    self._handle_file_request(req, client)
+                except Exception:
+                    log.exception("Error handling file request %s", req.request_id)
+
+    def _handle_file_request(self, req: Any, client: BeholderClient) -> None:
+        """Find and upload a requested file using the originating client."""
         for wp in self._config.watched_paths:
             file_path = wp.path / req.path
             if file_path.exists() and file_path.is_file():
                 log.info("Uploading %s (request %s)", req.path, req.request_id)
                 stat = file_path.stat()
-                success = self._client.upload_file(
+                success = client.upload_file(
                     request_id=req.request_id,
                     file_path=file_path,
                     metadata={
@@ -350,3 +383,14 @@ class BeholderDaemon:
                 return
 
         log.warning("Requested file not found: %s", req.path)
+
+    def _attach_matched_files(self) -> None:
+        """Attach pending files with an extracted item_id to their datalab item.
+
+        Body intentionally left as a stub for the user to fill in. Iterates
+        per watched path, picks the right client via :meth:`_client_for`,
+        reads pending entries via ``state.get_pending_changes``, filters for
+        ``e.ids.get("item_id")``, performs the upload, and on success calls
+        ``state.mark_synced`` for that path. Failures are left un-synced and
+        retried on the next tick.
+        """
