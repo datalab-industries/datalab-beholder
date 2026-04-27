@@ -342,7 +342,7 @@ class TestBeholderDaemon:
         daemon = self._make_daemon(config, transport, monkeypatch)
 
         assert daemon.config is config
-        assert daemon.client is daemon._clients_by_wp["test-data"]
+        assert daemon.clients is daemon._clients
 
         daemon.setup()
         daemon.shutdown()

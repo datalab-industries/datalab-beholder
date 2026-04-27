@@ -67,6 +67,11 @@ class BeholderDaemon:
         """The daemon's configuration."""
         return self._config
 
+    @property
+    def clients(self) -> dict[str, BeholderClient]:
+        """Mapping of datalab name → client. Read-only view for callers."""
+        return self._clients
+
     def _client_for(self, wp: Any) -> BeholderClient:
         """Return the BeholderClient that owns ``wp``."""
         return self._clients_by_wp[wp.name]
