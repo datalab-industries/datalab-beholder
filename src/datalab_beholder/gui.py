@@ -123,9 +123,10 @@ class BeholderGUI(tk.Tk):
         self._running = False
         self._tick_counter = 0
 
-        # Connection state
-        self._server_reachable = False
-        self._authenticated = False
+        # Connection state — aggregated across all configured datalabs.
+        self._n_total = 0
+        self._n_reachable = 0
+        self._n_authed = 0
 
         self._build_ui()
         self._install_log_handler()
@@ -401,8 +402,24 @@ class BeholderGUI(tk.Tk):
     # -- Connection check -----------------------------------------------------
 
     def _check_connection(self) -> None:
-        """Run a connection/auth check against the server."""
-        pass
+        """Aggregate connection/auth status across every configured datalab."""
+        if self._daemon is None:
+            return
+        clients = self._daemon.clients
+        self._n_total = len(clients)
+        self._n_reachable = 0
+        self._n_authed = 0
+        for name, client in clients.items():
+            try:
+                reachable, authed = client.check_connection()
+            except Exception:
+                log.exception("Connection check failed for %s", name)
+                continue
+            if reachable:
+                self._n_reachable += 1
+            if authed:
+                self._n_authed += 1
+        self._update_status()
 
     # -- Tick loop (driven by Tk.after) ---------------------------------------
 
@@ -427,36 +444,38 @@ class BeholderGUI(tk.Tk):
         if self._daemon is None:
             return
 
-        # Server indicator
-        if self._server_reachable:
-            self._set_indicator(
-                self._server_ind,
-                GREEN,
-                self._server_ind_label,
-                "Connected",
-            )
+        # Server / Auth indicators show aggregate "N/M" with worst-case colour.
+        total = self._n_total
+        if total == 0:
+            self._set_indicator(self._server_ind, GREY, self._server_ind_label, "—")
+            self._set_indicator(self._auth_ind, GREY, self._auth_ind_label, "—")
         else:
+            reachable = self._n_reachable
+            if reachable == total:
+                server_colour = GREEN
+            elif reachable == 0:
+                server_colour = RED
+            else:
+                server_colour = YELLOW
             self._set_indicator(
                 self._server_ind,
-                RED,
+                server_colour,
                 self._server_ind_label,
-                "Disconnected",
+                f"{reachable}/{total} connected",
             )
 
-        # Auth indicator
-        if self._authenticated:
+            authed = self._n_authed
+            if authed == total:
+                auth_colour = GREEN
+            elif authed == 0:
+                auth_colour = RED
+            else:
+                auth_colour = YELLOW
             self._set_indicator(
                 self._auth_ind,
-                GREEN,
+                auth_colour,
                 self._auth_ind_label,
-                "Authenticated",
-            )
-        else:
-            self._set_indicator(
-                self._auth_ind,
-                YELLOW,
-                self._auth_ind_label,
-                "Not authenticated",
+                f"{authed}/{total} authenticated",
             )
 
         # Sync indicator
@@ -548,47 +567,35 @@ class SettingsDialog(tk.Toplevel):
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
 
-        pad: dict[str, Any] = {"padx": 12, "pady": 4}
-
-        # -- Connection section -----------------------------------------------
+        # -- Datalabs section -------------------------------------------------
         tk.Label(
             self,
-            text="datalab URL:",
-            font=FONT,
+            text="Datalab Instances:",
+            font=FONT_HEADING,
             bg=BG,
             fg=FG,
             anchor="w",
-        ).grid(row=0, column=0, sticky="w", **pad)
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
 
-        self._url_var = tk.StringVar(value=self._config.datalab.url)
-        tk.Entry(
+        self._datalabs_frame = tk.Frame(self, bg=BG)
+        self._datalabs_frame.grid(row=1, column=0, sticky="ew", padx=12)
+        self._datalabs_frame.columnconfigure(2, weight=1)
+
+        self._datalab_rows: list[dict] = []
+        for d in self._config.datalabs:
+            self._add_datalab_row(d.name, d.url, d.api_key)
+
+        tk.Button(
             self,
-            textvariable=self._url_var,
+            text="+ Add Datalab",
+            command=lambda: self._add_datalab_row("", "", ""),
             bg=BG_LIGHT,
             fg=FG,
-            insertbackground=FG,
+            activebackground=BG,
+            activeforeground=FG,
             relief="flat",
-        ).grid(row=1, column=0, sticky="ew", **pad)
-
-        tk.Label(
-            self,
-            text="API Key:",
-            font=FONT,
-            bg=BG,
-            fg=FG,
-            anchor="w",
-        ).grid(row=2, column=0, sticky="w", **pad)
-
-        self._api_key_var = tk.StringVar(value=self._config.datalab.api_key)
-        tk.Entry(
-            self,
-            textvariable=self._api_key_var,
-            show="*",
-            bg=BG_LIGHT,
-            fg=FG,
-            insertbackground=FG,
-            relief="flat",
-        ).grid(row=3, column=0, sticky="ew", **pad)
+            padx=6,
+        ).grid(row=2, column=0, sticky="w", padx=12, pady=4)
 
         # -- Watched paths section --------------------------------------------
         tk.Label(
@@ -602,11 +609,11 @@ class SettingsDialog(tk.Toplevel):
 
         self._paths_frame = tk.Frame(self, bg=BG)
         self._paths_frame.grid(row=5, column=0, sticky="ew", padx=12)
-        self._paths_frame.columnconfigure(0, weight=1)
+        self._paths_frame.columnconfigure(1, weight=1)
 
         self._path_rows: list[dict] = []
         for wp in self._config.watched_paths:
-            self._add_path_row(wp.name, str(wp.path))
+            self._add_path_row(wp.name, str(wp.path), wp.datalab or "")
 
         tk.Button(
             self,
@@ -721,7 +728,100 @@ class SettingsDialog(tk.Toplevel):
             pady=4,
         ).pack(side="right")
 
-    def _add_path_row(self, name: str, path: str) -> None:
+    def _add_datalab_row(self, name: str, url: str, api_key: str) -> None:
+        row_idx = len(self._datalab_rows)
+        frame = tk.Frame(self._datalabs_frame, bg=BG_LIGHT)
+        frame.grid(row=row_idx, column=0, sticky="ew", pady=1)
+        frame.columnconfigure(2, weight=1)
+
+        name_var = tk.StringVar(value=name)
+        tk.Entry(
+            frame,
+            textvariable=name_var,
+            width=12,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+        ).grid(row=0, column=0, padx=4, pady=2)
+
+        url_var = tk.StringVar(value=url)
+        tk.Entry(
+            frame,
+            textvariable=url_var,
+            width=24,
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+        ).grid(row=0, column=1, padx=4, pady=2)
+
+        api_key_var = tk.StringVar(value=api_key)
+        tk.Entry(
+            frame,
+            textvariable=api_key_var,
+            show="*",
+            bg=BG_LIGHT,
+            fg=FG,
+            insertbackground=FG,
+            relief="flat",
+        ).grid(row=0, column=2, sticky="ew", padx=4, pady=2)
+
+        def remove() -> None:
+            frame.destroy()
+            self._datalab_rows = [
+                r for r in self._datalab_rows if r["frame"] is not frame
+            ]
+            self._refresh_path_dropdowns()
+
+        tk.Button(
+            frame,
+            text="x",
+            command=remove,
+            bg=BG_LIGHT,
+            fg=RED,
+            activebackground=BG,
+            activeforeground=RED,
+            relief="flat",
+            padx=4,
+        ).grid(row=0, column=3, padx=(0, 4), pady=2)
+
+        # Re-render to keep the value commitments live in the entry; for the
+        # name field, propagate live changes to the path-row dropdowns so the
+        # user sees the new option as soon as they type it.
+        name_var.trace_add("write", lambda *_: self._refresh_path_dropdowns())
+
+        self._datalab_rows.append(
+            {
+                "frame": frame,
+                "name": name_var,
+                "url": url_var,
+                "api_key": api_key_var,
+            }
+        )
+        self._refresh_path_dropdowns()
+
+    def _datalab_names(self) -> list[str]:
+        return [
+            r["name"].get().strip()
+            for r in self._datalab_rows
+            if r["name"].get().strip()
+        ]
+
+    def _refresh_path_dropdowns(self) -> None:
+        names = self._datalab_names()
+        for row in self._path_rows:
+            menu = row["datalab_menu"]["menu"]
+            menu.delete(0, "end")
+            for n in names:
+                menu.add_command(
+                    label=n, command=lambda v=n, var=row["datalab"]: var.set(v)
+                )
+            # If the row's current value isn't in the list any more, blank it.
+            if row["datalab"].get() not in names:
+                row["datalab"].set("")
+
+    def _add_path_row(self, name: str, path: str, datalab: str = "") -> None:
         row_idx = len(self._path_rows)
         frame = tk.Frame(self._paths_frame, bg=BG_LIGHT)
         frame.grid(row=row_idx, column=0, sticky="ew", pady=1)
@@ -731,7 +831,7 @@ class SettingsDialog(tk.Toplevel):
         tk.Entry(
             frame,
             textvariable=name_var,
-            width=14,
+            width=12,
             bg=BG_LIGHT,
             fg=FG,
             insertbackground=FG,
@@ -748,7 +848,22 @@ class SettingsDialog(tk.Toplevel):
             relief="flat",
         ).grid(row=0, column=1, sticky="ew", padx=4, pady=2)
 
-        def remove():
+        datalab_var = tk.StringVar(value=datalab)
+        names = self._datalab_names() or [""]
+        datalab_menu = tk.OptionMenu(frame, datalab_var, *names)
+        datalab_menu.configure(
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            highlightthickness=0,
+            width=10,
+        )
+        datalab_menu["menu"].configure(bg=BG_LIGHT, fg=FG)
+        datalab_menu.grid(row=0, column=2, padx=4, pady=2)
+
+        def remove() -> None:
             frame.destroy()
             self._path_rows = [r for r in self._path_rows if r["frame"] is not frame]
 
@@ -762,13 +877,15 @@ class SettingsDialog(tk.Toplevel):
             activeforeground=RED,
             relief="flat",
             padx=4,
-        ).grid(row=0, column=2, padx=(0, 4), pady=2)
+        ).grid(row=0, column=3, padx=(0, 4), pady=2)
 
         self._path_rows.append(
             {
                 "frame": frame,
                 "name": name_var,
                 "path": path_var,
+                "datalab": datalab_var,
+                "datalab_menu": datalab_menu,
             }
         )
 
@@ -777,16 +894,13 @@ class SettingsDialog(tk.Toplevel):
 
     def add_path(self, name: str, path: str) -> None:
         """Called by AddPathDialog on confirmation."""
-        self._add_path_row(name, path)
+        # Datalab can be picked from the dropdown after the row is added; if
+        # there's only one configured datalab, pre-select it.
+        names = self._datalab_names()
+        default = names[0] if len(names) == 1 else ""
+        self._add_path_row(name, path, default)
 
     def _save(self) -> None:
-        url = self._url_var.get().strip()
-        api_key = self._api_key_var.get().strip()
-
-        if not url:
-            messagebox.showerror("Validation", "URL is required.", parent=self)
-            return
-
         try:
             metadata_interval = int(self._metadata_var.get())
             poll_interval = int(self._poll_var.get())
@@ -798,12 +912,57 @@ class SettingsDialog(tk.Toplevel):
             )
             return
 
-        watched_paths = []
+        datalabs: list[dict] = []
+        seen_names: set[str] = set()
+        for row in self._datalab_rows:
+            name = row["name"].get().strip()
+            url = row["url"].get().strip()
+            api_key = row["api_key"].get().strip()
+            if not (name or url or api_key):
+                continue
+            if not name or not url:
+                messagebox.showerror(
+                    "Validation",
+                    "Each datalab needs a name and URL.",
+                    parent=self,
+                )
+                return
+            if name in seen_names:
+                messagebox.showerror(
+                    "Validation",
+                    f"Duplicate datalab name: {name!r}",
+                    parent=self,
+                )
+                return
+            seen_names.add(name)
+            datalabs.append({"name": name, "url": url, "api_key": api_key})
+
+        if not datalabs:
+            messagebox.showerror(
+                "Validation",
+                "At least one datalab is required.",
+                parent=self,
+            )
+            return
+
+        watched_paths: list[dict] = []
         for row in self._path_rows:
             name = row["name"].get().strip()
             path = row["path"].get().strip()
-            if name and path:
-                watched_paths.append({"path": path, "name": name})
+            datalab = row["datalab"].get().strip()
+            if not (name or path):
+                continue
+            if not name or not path:
+                messagebox.showerror(
+                    "Validation",
+                    "Each watched path needs a name and path.",
+                    parent=self,
+                )
+                return
+            entry = {"path": path, "name": name}
+            if datalab:
+                entry["datalab"] = datalab
+            watched_paths.append(entry)
 
         if not watched_paths:
             messagebox.showerror(
@@ -814,7 +973,7 @@ class SettingsDialog(tk.Toplevel):
             return
 
         config_dict = {
-            "datalab": {"url": url, "api_key": api_key},
+            "datalabs": datalabs,
             "watched_paths": watched_paths,
             "sync": {
                 "metadata_interval": metadata_interval,
@@ -822,6 +981,15 @@ class SettingsDialog(tk.Toplevel):
             },
             "log_level": self._config.log_level,
         }
+
+        # Run the full pydantic validation chain so cross-field issues
+        # (unknown datalab refs, ambiguous defaults, etc.) surface in the
+        # dialog instead of being written to disk and then exploding on load.
+        try:
+            BeholderConfig(**config_dict)
+        except Exception as e:
+            messagebox.showerror("Validation", str(e), parent=self)
+            return
 
         # Write to file
         config_path = self._config_path
