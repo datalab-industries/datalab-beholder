@@ -63,6 +63,22 @@ class ScanResult:
         }
 
 
+@dataclass
+class WarmScanResult:
+    """Output of a directory-mtime-aware warm scan.
+
+    Only files under `changed_dirs` are authoritative — directories whose
+    mtime didn't exceed the previous scan anchor are not re-stat'd, and
+    their files are assumed unchanged. The state-store consumer scopes
+    its diff to `changed_dirs`.
+    """
+
+    name: str
+    entries: list[FileEntry]
+    changed_dirs: list[str]  # relative paths (forward-slash)
+    max_dir_mtime: float
+
+
 def _matches_any(name: str, patterns: list[str]) -> bool:
     """Check if a filename matches any of the given glob patterns."""
     return any(fnmatch.fnmatch(name, p) for p in patterns if p)
@@ -210,3 +226,175 @@ def scan_directory(
         total_directories=total_dirs,
         total_size=total_size,
     )
+
+
+def warm_scan_directory(
+    root: Path,
+    name: str = "",
+    include_patterns: list[str] | None = None,
+    exclude_patterns: list[str] | None = None,
+    id_patterns: list[str] | None = None,
+    max_depth: int | None = None,
+    since_mtime: float | None = None,
+) -> WarmScanResult:
+    """Walk the tree, but only re-stat files in directories whose mtime is
+    newer than `since_mtime`.
+
+    Discovers new files, deletions, and renames in active subtrees while
+    skipping the per-file stats in cold subtrees. In-place file rewrites
+    don't bump the parent dir's mtime — those are caught by the cold scan.
+
+    Returns a `WarmScanResult` whose `changed_dirs` lists every directory
+    (relative path, forward-slashed) whose contents were re-stat'd.
+    """
+    if include_patterns is None:
+        include_patterns = ["*"]
+    if exclude_patterns is None:
+        exclude_patterns = []
+    if id_patterns is None:
+        id_patterns = []
+
+    compiled_id_patterns = [re.compile(p) for p in id_patterns if p]
+
+    root = Path(root).resolve()
+    if not name:
+        name = root.name
+
+    entries: list[FileEntry] = []
+    changed_dirs: list[str] = []
+    max_dir_mtime = since_mtime or 0.0
+
+    def _rel(p: str) -> str:
+        return os.path.relpath(p, root).replace(os.sep, "/")
+
+    def _walk(directory: Path, depth: int) -> None:
+        nonlocal max_dir_mtime
+        try:
+            dir_mtime = directory.stat().st_mtime
+        except (OSError, PermissionError) as e:
+            log.warning("Cannot stat directory %s: %s", directory, e)
+            return
+
+        if dir_mtime > max_dir_mtime:
+            max_dir_mtime = dir_mtime
+
+        try:
+            scanner = os.scandir(directory)
+        except PermissionError:
+            log.warning("Permission denied: %s", directory)
+            return
+        except OSError as e:
+            log.warning("Error scanning %s: %s", directory, e)
+            return
+
+        # Mtime short-circuit: if this directory hasn't changed since the
+        # last warm scan, its files are assumed stable. We still need to
+        # recurse into subdirectories — their mtimes don't propagate up.
+        scan_files_here = since_mtime is None or dir_mtime > since_mtime
+        if scan_files_here:
+            rel_dir = _rel(str(directory)) if directory != root else ""
+            changed_dirs.append(rel_dir)
+
+        with scanner:
+            for entry in scanner:
+                entry_name = entry.name
+                if _matches_any(entry_name, exclude_patterns):
+                    continue
+
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError as e:
+                    log.warning("Cannot classify %s: %s", entry.path, e)
+                    continue
+
+                if is_dir:
+                    if max_depth is None or depth < max_depth:
+                        _walk(Path(entry.path), depth + 1)
+                    continue
+
+                if not scan_files_here:
+                    continue
+
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if not _matches_any(entry_name, include_patterns):
+                    continue
+
+                rel_path = _rel(entry.path)
+                ids = _match_id_patterns(rel_path, compiled_id_patterns)
+                if ids is None:
+                    continue
+
+                try:
+                    stat = entry.stat(follow_symlinks=False)
+                except (OSError, PermissionError) as e:
+                    log.warning("Cannot stat %s: %s", entry.path, e)
+                    continue
+
+                entries.append(
+                    FileEntry(
+                        path=rel_path,
+                        size=stat.st_size,
+                        modified=stat.st_mtime,
+                        is_directory=False,
+                        ids=ids,
+                    )
+                )
+
+    _walk(root, 0)
+
+    return WarmScanResult(
+        name=name,
+        entries=entries,
+        changed_dirs=changed_dirs,
+        max_dir_mtime=max_dir_mtime,
+    )
+
+
+def hot_stat_paths(
+    root: Path,
+    paths: list[str],
+    id_patterns: list[str] | None = None,
+) -> tuple[list[FileEntry], list[str]]:
+    """Stat each `path` (relative to `root`) directly.
+
+    Returns a `(survived, missing)` tuple: `survived` is the list of file
+    entries that still exist with up-to-date metadata; `missing` is the
+    list of paths that raised FileNotFoundError. Used by the hot scan to
+    refresh a small set of recently-modified files without walking the
+    tree.
+
+    `id_patterns` is re-applied so the captured ids stay attached on the
+    refreshed entries; pass the same list as the watched path's config.
+    """
+    if id_patterns is None:
+        id_patterns = []
+    compiled = [re.compile(p) for p in id_patterns if p]
+
+    root = Path(root).resolve()
+    survived: list[FileEntry] = []
+    missing: list[str] = []
+
+    for rel in paths:
+        full = root / rel
+        try:
+            st = os.stat(full)
+        except FileNotFoundError:
+            missing.append(rel)
+            continue
+        except (OSError, PermissionError) as e:
+            log.warning("Cannot stat %s: %s", full, e)
+            continue
+
+        ids = _match_id_patterns(rel, compiled)
+        survived.append(
+            FileEntry(
+                path=rel,
+                size=st.st_size,
+                modified=st.st_mtime,
+                is_directory=False,
+                ids=ids or {},
+            )
+        )
+
+    return survived, missing

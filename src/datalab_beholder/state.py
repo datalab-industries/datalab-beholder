@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 
-from datalab_beholder.scanner import FileEntry, ScanResult
+from datalab_beholder.scanner import FileEntry, ScanResult, WarmScanResult
 
 # Registry + sync log are always present. Per-path file tables are created
 # on demand by `register_watched_path`.
@@ -47,6 +47,21 @@ CREATE TABLE IF NOT EXISTS sync_log (
 # SQLite doesn't bind table names, so we interpolate after sanitising. The
 # sanitised name is stored in the registry as the canonical form.
 _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _in_scope_filter(changed_dirs: list[str]):
+    """Build a predicate `path -> bool` that returns True if `path` is
+    inside any of the directories in `changed_dirs`.
+
+    Empty string in `changed_dirs` means the watched-path root itself was
+    rescanned, which scopes the entire tree.
+    """
+    if "" in changed_dirs:
+        return lambda _path: True
+    prefixes = tuple(d.rstrip("/") + "/" for d in changed_dirs if d)
+    if not prefixes:
+        return lambda _path: False
+    return lambda path: path.startswith(prefixes)
 
 
 def _sanitise_name(name: str) -> str:
@@ -315,6 +330,192 @@ class StateStore:
                     f"UPDATE files__{table} SET status = 'deleted' WHERE path = ?",
                     (path,),
                 )
+
+        self._conn.commit()
+        return diff
+
+    def update_from_warm_scan(self, warm: WarmScanResult) -> DiffResult:
+        """Diff a warm scan's partial output against state.
+
+        Files outside the `changed_dirs` scope are not touched (they're
+        assumed unchanged because their parent directory's mtime didn't
+        move). Within the scope, behaviour matches `update_from_scan`:
+        new files are inserted, modified files are updated, files that
+        were in state but missing from the scan are marked deleted.
+        """
+        watched_name = warm.name
+        table = self._table_for(watched_name)
+        diff = DiffResult(watched_path_name=watched_name)
+        now = time()
+
+        cursor = self._conn.execute(
+            f"SELECT path, size, modified, status, ids_json FROM files__{table}"
+        )
+        existing = {row["path"]: dict(row) for row in cursor}
+        observed = {entry.path: entry for entry in warm.entries}
+        in_scope = _in_scope_filter(warm.changed_dirs)
+
+        for path, entry in observed.items():
+            prev = existing.get(path)
+            ids_json = json.dumps(entry.ids)
+            if prev is None:
+                diff.new.append(
+                    DiffEntry(
+                        path=path,
+                        size=entry.size,
+                        modified=entry.modified,
+                        is_directory=entry.is_directory,
+                        status="new",
+                        ids=dict(entry.ids),
+                    )
+                )
+                self._conn.execute(
+                    f"INSERT INTO files__{table} "
+                    "(path, size, modified, last_seen, status, ids_json) "
+                    "VALUES (?, ?, ?, ?, 'new', ?)",
+                    (path, entry.size, entry.modified, now, ids_json),
+                )
+            elif prev["size"] != entry.size or prev["modified"] != entry.modified:
+                diff.modified.append(
+                    DiffEntry(
+                        path=path,
+                        size=entry.size,
+                        modified=entry.modified,
+                        is_directory=entry.is_directory,
+                        status="modified",
+                        ids=dict(entry.ids),
+                    )
+                )
+                self._conn.execute(
+                    f"UPDATE files__{table} "
+                    "SET size = ?, modified = ?, last_seen = ?, "
+                    "    status = 'modified', ids_json = ? "
+                    "WHERE path = ?",
+                    (entry.size, entry.modified, now, ids_json, path),
+                )
+            else:
+                diff.unchanged += 1
+                self._conn.execute(
+                    f"UPDATE files__{table} SET last_seen = ? WHERE path = ?",
+                    (now, path),
+                )
+
+        for path, data in existing.items():
+            if path in observed or data["status"] == "deleted":
+                continue
+            if not in_scope(path):
+                continue
+            diff.deleted.append(
+                DiffEntry(
+                    path=path,
+                    size=data["size"],
+                    modified=data["modified"],
+                    is_directory=False,
+                    status="deleted",
+                    ids=json.loads(data.get("ids_json") or "{}"),
+                )
+            )
+            self._conn.execute(
+                f"UPDATE files__{table} SET status = 'deleted' WHERE path = ?",
+                (path,),
+            )
+
+        self._conn.commit()
+        return diff
+
+    def update_from_targeted_stats(
+        self,
+        watched_path_name: str,
+        observed: list[FileEntry],
+        missing: list[str],
+    ) -> DiffResult:
+        """Diff a targeted set of file stats against state.
+
+        Only the paths in `observed` (still present, with fresh stat) and
+        `missing` (raised FileNotFoundError) are authoritative. Any other
+        file in state is left alone. Used by the hot scan, which only
+        stats the recently-modified subset of known files.
+        """
+        table = self._table_for(watched_path_name)
+        diff = DiffResult(watched_path_name=watched_path_name)
+        now = time()
+
+        observed_paths = {e.path for e in observed}
+        relevant_paths = list(observed_paths | set(missing))
+        if not relevant_paths:
+            return diff
+
+        placeholders = ",".join("?" for _ in relevant_paths)
+        cursor = self._conn.execute(
+            f"SELECT path, size, modified, status, ids_json FROM files__{table} "
+            f"WHERE path IN ({placeholders})",
+            relevant_paths,
+        )
+        existing = {row["path"]: dict(row) for row in cursor}
+
+        for entry in observed:
+            prev = existing.get(entry.path)
+            ids_json = json.dumps(entry.ids)
+            if prev is None:
+                diff.new.append(
+                    DiffEntry(
+                        path=entry.path,
+                        size=entry.size,
+                        modified=entry.modified,
+                        is_directory=entry.is_directory,
+                        status="new",
+                        ids=dict(entry.ids),
+                    )
+                )
+                self._conn.execute(
+                    f"INSERT INTO files__{table} "
+                    "(path, size, modified, last_seen, status, ids_json) "
+                    "VALUES (?, ?, ?, ?, 'new', ?)",
+                    (entry.path, entry.size, entry.modified, now, ids_json),
+                )
+            elif prev["size"] != entry.size or prev["modified"] != entry.modified:
+                diff.modified.append(
+                    DiffEntry(
+                        path=entry.path,
+                        size=entry.size,
+                        modified=entry.modified,
+                        is_directory=entry.is_directory,
+                        status="modified",
+                        ids=dict(entry.ids),
+                    )
+                )
+                self._conn.execute(
+                    f"UPDATE files__{table} "
+                    "SET size = ?, modified = ?, last_seen = ?, "
+                    "    status = 'modified', ids_json = ? "
+                    "WHERE path = ?",
+                    (entry.size, entry.modified, now, ids_json, entry.path),
+                )
+            else:
+                diff.unchanged += 1
+                self._conn.execute(
+                    f"UPDATE files__{table} SET last_seen = ? WHERE path = ?",
+                    (now, entry.path),
+                )
+
+        for path in missing:
+            prev = existing.get(path)
+            if prev is None or prev["status"] == "deleted":
+                continue
+            diff.deleted.append(
+                DiffEntry(
+                    path=path,
+                    size=prev["size"],
+                    modified=prev["modified"],
+                    is_directory=False,
+                    status="deleted",
+                    ids=json.loads(prev.get("ids_json") or "{}"),
+                )
+            )
+            self._conn.execute(
+                f"UPDATE files__{table} SET status = 'deleted' WHERE path = ?",
+                (path,),
+            )
 
         self._conn.commit()
         return diff

@@ -184,8 +184,69 @@ class LocalWatchedPath(WatchedPathBase):
     def expand_path(cls, v: Path) -> Path:
         return Path(os.path.expanduser(v)).resolve()
 
-    # Scan methods land in the next commit; for now inherit the
-    # NotImplementedError stubs from WatchedPathBase.
+    def hot_scan(self, state: StateStore) -> DiffResult:  # type: ignore[override]
+        from time import time as _now
+
+        from datalab_beholder.scanner import hot_stat_paths
+
+        cutoff = _now() - self.scan.hot_window
+        candidate_paths = state.recently_modified_paths(self.name, since=cutoff)
+        survived, missing = hot_stat_paths(
+            self.path, candidate_paths, id_patterns=self.id_patterns
+        )
+        diff = state.update_from_targeted_stats(self.name, survived, missing)
+        state.update_scan_timestamp(self.name, "hot", _now())
+        return diff
+
+    def warm_scan(self, state: StateStore) -> DiffResult:  # type: ignore[override]
+        from time import time as _now
+
+        from datalab_beholder.scanner import warm_scan_directory
+
+        ts = state.get_scan_timestamps(self.name)
+        warm = warm_scan_directory(
+            self.path,
+            name=self.name,
+            include_patterns=self.include_patterns,
+            exclude_patterns=self.exclude_patterns,
+            id_patterns=self.id_patterns,
+            max_depth=self.max_depth,
+            since_mtime=ts.max_dir_mtime,
+        )
+        diff = state.update_from_warm_scan(warm)
+        state.update_scan_timestamp(self.name, "warm", _now())
+        state.update_max_dir_mtime(self.name, warm.max_dir_mtime)
+        return diff
+
+    def cold_scan(self, state: StateStore) -> DiffResult:  # type: ignore[override]
+        from dataclasses import replace
+        from time import time as _now
+
+        from datalab_beholder.scanner import scan_directory
+
+        # Include dir entries so we can compute max_dir_mtime — the warm
+        # scan's short-circuit anchor — but strip them before diffing
+        # state, which only stores file rows.
+        scan = scan_directory(
+            self.path,
+            name=self.name,
+            include_patterns=self.include_patterns,
+            exclude_patterns=self.exclude_patterns,
+            id_patterns=self.id_patterns,
+            max_depth=self.max_depth,
+            skip_dirs=False,
+        )
+        file_entries = [e for e in scan.entries if not e.is_directory]
+        dir_entries = [e for e in scan.entries if e.is_directory]
+
+        file_scan = replace(scan, entries=file_entries)
+        diff = state.update_from_scan(file_scan)
+
+        max_dir_mtime = max((e.modified for e in dir_entries), default=0.0)
+        if max_dir_mtime:
+            state.update_max_dir_mtime(self.name, max_dir_mtime)
+        state.update_scan_timestamp(self.name, "cold", _now())
+        return diff
 
 
 class SSHWatchedPath(WatchedPathBase):
