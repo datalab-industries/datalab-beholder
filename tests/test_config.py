@@ -10,12 +10,14 @@ from pydantic import ValidationError
 from datalab_beholder.config import (
     ALLOWED_ID_GROUPS,
     BeholderConfig,
-    WatchedPath,
+    CloudWatchedPath,
+    LocalWatchedPath,
+    SSHWatchedPath,
 )
 
 
-def _make(id_patterns: list[str], tmp_path: Path) -> WatchedPath:
-    return WatchedPath(
+def _make(id_patterns: list[str], tmp_path: Path) -> LocalWatchedPath:
+    return LocalWatchedPath(
         path=tmp_path,
         name="t",
         id_patterns=id_patterns,
@@ -278,3 +280,105 @@ class TestDatalabRefValidation:
         )
         assert cfg.watched_paths[0].datalab == "a"
         assert cfg.watched_paths[1].datalab == "b"
+
+
+class TestDiscriminatedUnion:
+    """`WatchedPath` is a discriminated union over Local/SSH/Cloud subclasses."""
+
+    def test_missing_kind_defaults_to_local(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("d")],
+            watched_paths=[{"path": str(tmp_path), "name": "wp1", "datalab": "d"}],
+            state_db=tmp_path / "s.db",
+        )
+        assert isinstance(cfg.watched_paths[0], LocalWatchedPath)
+        assert cfg.watched_paths[0].kind == "local"
+
+    def test_explicit_local_kind(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("d")],
+            watched_paths=[
+                {
+                    "kind": "local",
+                    "path": str(tmp_path),
+                    "name": "wp1",
+                    "datalab": "d",
+                }
+            ],
+            state_db=tmp_path / "s.db",
+        )
+        assert isinstance(cfg.watched_paths[0], LocalWatchedPath)
+
+    def test_ssh_kind_round_trips(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("d")],
+            watched_paths=[
+                {
+                    "kind": "ssh",
+                    "host": "bob@archive.example.org",
+                    "path": "/data/runs",
+                    "name": "wp_ssh",
+                    "datalab": "d",
+                }
+            ],
+            state_db=tmp_path / "s.db",
+        )
+        assert isinstance(cfg.watched_paths[0], SSHWatchedPath)
+        assert cfg.watched_paths[0].host == "bob@archive.example.org"
+        assert str(cfg.watched_paths[0].path) == "/data/runs"
+
+    def test_cloud_kind_round_trips(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("d")],
+            watched_paths=[
+                {
+                    "kind": "cloud",
+                    "path": str(tmp_path),
+                    "name": "wp_cloud",
+                    "datalab": "d",
+                    "provider": "onedrive",
+                }
+            ],
+            state_db=tmp_path / "s.db",
+        )
+        assert isinstance(cfg.watched_paths[0], CloudWatchedPath)
+        assert cfg.watched_paths[0].provider == "onedrive"
+
+    def test_ssh_scan_methods_raise_not_implemented(self, tmp_path: Path) -> None:
+        wp = SSHWatchedPath(host="x@y", path="/data", name="wp", datalab="d")
+        for method in (wp.hot_scan, wp.warm_scan, wp.cold_scan):
+            with pytest.raises(NotImplementedError):
+                method(state=None)  # type: ignore[arg-type]
+
+    def test_cloud_scan_methods_raise_not_implemented(self, tmp_path: Path) -> None:
+        wp = CloudWatchedPath(path=tmp_path, name="wp", datalab="d")
+        for method in (wp.hot_scan, wp.warm_scan, wp.cold_scan):
+            with pytest.raises(NotImplementedError):
+                method(state=None)  # type: ignore[arg-type]
+
+
+class TestScanCadence:
+    def test_defaults_present(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(path=tmp_path, name="wp")
+        assert wp.scan.hot_interval == 60
+        assert wp.scan.warm_interval == 3600
+        assert wp.scan.cold_interval == 86400
+        assert wp.scan.hot_window == 86400
+
+    def test_cold_interval_can_be_disabled(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(
+            path=tmp_path,
+            name="wp",
+            scan={"cold_interval": None},  # type: ignore[arg-type]
+        )
+        assert wp.scan.cold_interval is None
+
+    def test_per_path_overrides(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(
+            path=tmp_path,
+            name="wp",
+            scan={"hot_interval": 5, "warm_interval": 30, "hot_window": 600},  # type: ignore[arg-type]
+        )
+        assert wp.scan.hot_interval == 5
+        assert wp.scan.warm_interval == 30
+        assert wp.scan.hot_window == 600
