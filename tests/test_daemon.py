@@ -25,6 +25,12 @@ class TestBeholderDaemon:
                 {
                     "path": str(tmp_tree),
                     "name": "test-data",
+                    # short hot_window so tests using time-based gating work
+                    "scan": {
+                        "hot_interval": 0,
+                        "warm_interval": 0,
+                        "cold_interval": 0,
+                    },
                 }
             ],
             sync={"metadata_interval": 1, "file_request_poll": 1},
@@ -32,7 +38,8 @@ class TestBeholderDaemon:
         )
 
     def _make_daemon(self, config, mock_transport, monkeypatch):
-        """Create a daemon with a mocked client."""
+        """Create a daemon with a mocked client (bypasses __init__'s
+        BeholderClient construction to avoid live network calls)."""
         daemon = BeholderDaemon.__new__(BeholderDaemon)
         daemon._config = config
         daemon._running = False
@@ -46,9 +53,7 @@ class TestBeholderDaemon:
         daemon._clients = {d.name: client for d in config.datalabs}
         daemon._clients_by_wp = {wp.name: client for wp in config.watched_paths}
         daemon._daemon_id = daemon._build_daemon_id()
-        daemon._watcher = None
 
-        # New status attributes added by the tick/setup refactor
         daemon.last_scan_time = None
         daemon.last_push_time = None
         daemon.pending_count = 0
@@ -62,52 +67,87 @@ class TestBeholderDaemon:
         daemon = self._make_daemon(config, transport, monkeypatch)
         assert daemon._daemon_id == "test-data"
 
-    def test_initial_scan(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
-        """Initial scan should perform a full scan and push metadata."""
-        transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        daemon._initial_scan()
-
-        # Should have made a metadata push
-        assert len(transport.requests) == 1
-
-    def test_initial_scan_handles_missing_path(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """Initial scan should handle watched paths that don't exist."""
-        config = BeholderConfig(
-            datalabs=[
-                {
-                    "name": "test",
-                    "url": "https://test.example.org",
-                    "api_key": "test-key",
-                }
-            ],
-            watched_paths=[
-                {
-                    "path": str(tmp_path / "nonexistent"),
-                    "name": "missing",
-                }
-            ],
-            state_db=tmp_path / "state.db",
-        )
-        transport = MockTransport()
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        # Should not raise
-        daemon._initial_scan()
-
-    def test_push_pending_changes(
+    def test_setup_initialises_timers_without_scanning(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """Push loop should send accumulated state changes to the server."""
+        """setup() no longer scans — the first tick does that."""
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        daemon.setup()
+
+        assert daemon._running is True
+        assert daemon._last_push_mono is not None
+        # No HTTP requests yet — scanning hasn't happened.
+        assert transport.requests == []
+
+    def test_first_tick_runs_cold_scan_when_state_empty(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """A fresh registry has NULL timestamps → cold scan fires on first
+        tick (cold supersedes warm and hot)."""
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+
+        daemon.tick()
+
+        # Cold scan seeded state — there should be pending entries waiting
+        # for the next push.
+        pending = daemon._state.get_pending_changes("test-data")
+        assert len(pending) > 0
+        ts = daemon._state.get_scan_timestamps("test-data")
+        assert ts.cold is not None
+        assert ts.warm == ts.cold
+        assert ts.hot == ts.cold
+
+    def test_select_scan_tier_picks_cold_when_overdue(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        wp = config.watched_paths[0]
+        kind = daemon._select_scan_tier(wp, time.time())
+        # All timestamps NULL → cold wins.
+        assert kind == "cold"
+
+    def test_select_scan_tier_returns_none_when_nothing_due(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        wp = config.watched_paths[0]
+        # Bump cold to "right now" with a long-enough interval that nothing
+        # else is due.
+        wp.scan.hot_interval = 10000
+        wp.scan.warm_interval = 10000
+        wp.scan.cold_interval = 10000
+        daemon._state.update_scan_timestamp("test-data", "cold", time.time())
+
+        assert daemon._select_scan_tier(wp, time.time()) is None
+
+    def test_select_scan_tier_skips_cold_when_disabled(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+
+        wp = config.watched_paths[0]
+        wp.scan.cold_interval = None
+        # All NULL timestamps → falls through cold-disabled, picks warm.
+        kind = daemon._select_scan_tier(wp, time.time())
+        assert kind == "warm"
+
+    def test_push_pending_changes_pushes_accumulated_state(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
         transport = MockTransport()
         transport.add_response(
             "POST",
@@ -117,47 +157,33 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
-        # Seed state via initial scan (consumes one push request)
-        daemon._initial_scan()
-        transport.requests.clear()
-
-        # Simulate watcher adding a new entry
         from datalab_beholder.scanner import FileEntry
 
         daemon._state.upsert_entries(
             "test-data",
             [
                 FileEntry(
-                    path="watcher_new.csv", size=42, modified=9999.0, is_directory=False
-                ),
+                    path="watcher_new.csv",
+                    size=42,
+                    modified=9999.0,
+                    is_directory=False,
+                )
             ],
         )
 
         daemon._push_pending_changes()
 
-        # Should have pushed the new watcher entry
         assert len(transport.requests) == 1
 
     def test_push_pending_no_changes(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """Push loop should skip push when there are no pending changes."""
         transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
-        # Seed + sync (initial scan pushes and marks synced)
-        daemon._initial_scan()
-        transport.requests.clear()
-
-        # Push loop should find nothing pending
         daemon._push_pending_changes()
-        assert len(transport.requests) == 0
+        assert transport.requests == []
 
     def test_file_request_handling(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
@@ -201,96 +227,16 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
-        # Start daemon in background thread
         thread = threading.Thread(target=daemon.start)
         thread.start()
-
-        # Give it a moment to start
-        import time
-
         time.sleep(0.5)
-
-        # Signal stop
         daemon.stop()
         thread.join(timeout=5)
         assert not thread.is_alive()
 
-    def test_no_pending_after_initial_scan(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        """After a successful initial scan, all entries should be marked as synced."""
-        transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        daemon._initial_scan()
-        assert len(transport.requests) == 1
-
-        # After successful sync, no pending changes should remain
-        pending = daemon._state.get_pending_changes("test-data")
-        assert len(pending) == 0
-
-    def test_setup_runs_initial_scan_and_starts_watcher(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        """setup() should scan, start the watcher, and set last_scan_time."""
-        transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        daemon.setup()
-
-        assert daemon.last_scan_time is not None
-        assert daemon._watcher is not None
-        assert daemon._running is True
-        assert len(transport.requests) == 1
-
-        # Clean up the watcher
-        daemon.shutdown()
-
-    def test_tick_can_be_called_independently(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        """tick() should execute one loop iteration without errors."""
-        transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        transport.add_response(
-            "GET",
-            "/api/remote-files/pending",
-            json_data={"requests": []},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        daemon.setup()
-        transport.requests.clear()
-
-        # Calling tick should not raise
-        daemon.tick()
-
-        assert daemon.pending_count == 0
-        assert daemon.sync_status == "idle"
-
-        daemon.shutdown()
-
     def test_tick_pushes_when_interval_elapsed(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """tick() should push changes when the metadata interval has elapsed."""
         transport = MockTransport()
         transport.add_response(
             "POST",
@@ -304,50 +250,28 @@ class TestBeholderDaemon:
         )
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
-
         daemon.setup()
+        # First tick runs the cold scan, which seeds state.
+        daemon.tick()
         transport.requests.clear()
-
-        # Add a pending entry
-        from datalab_beholder.scanner import FileEntry
-
-        daemon._state.upsert_entries(
-            "test-data",
-            [
-                FileEntry(path="new.csv", size=10, modified=9999.0, is_directory=False),
-            ],
-        )
 
         # Force the push interval to have elapsed
         daemon._last_push_mono = time.monotonic() - config.sync.metadata_interval - 1
-
         daemon.tick()
 
-        # Should have pushed
         push_requests = [r for r in transport.requests if r.method == "POST"]
         assert len(push_requests) >= 1
         assert daemon.last_push_time is not None
 
-        daemon.shutdown()
-
-    def test_status_properties_after_setup(
+    def test_status_properties(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
-        """After setup, config and client should be accessible."""
         transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
         assert daemon.config is config
         assert daemon.clients is daemon._clients
-
-        daemon.setup()
-        daemon.shutdown()
 
 
 class TestMultiDatalabRouting:
@@ -362,8 +286,16 @@ class TestMultiDatalabRouting:
 
         config = BeholderConfig(
             datalabs=[
-                {"name": "north", "url": "https://north.example.org", "api_key": "k1"},
-                {"name": "south", "url": "https://south.example.org", "api_key": "k2"},
+                {
+                    "name": "north",
+                    "url": "https://north.example.org",
+                    "api_key": "k1",
+                },
+                {
+                    "name": "south",
+                    "url": "https://south.example.org",
+                    "api_key": "k2",
+                },
             ],
             watched_paths=[
                 {"path": str(tmp_path / "a"), "name": "wp-a", "datalab": "north"},
@@ -372,7 +304,6 @@ class TestMultiDatalabRouting:
             state_db=tmp_path / "state.db",
         )
 
-        # Stub BeholderClient so __init__ doesn't try to connect.
         from datalab_beholder import client as client_module
 
         constructed: list[str] = []
@@ -383,7 +314,6 @@ class TestMultiDatalabRouting:
                 constructed.append(datalab_api_url)
 
         monkeypatch.setattr(client_module, "BeholderClient", FakeClient)
-        # daemon.py imported the symbol directly, patch there too
         from datalab_beholder import daemon as daemon_module
 
         monkeypatch.setattr(daemon_module, "BeholderClient", FakeClient)
@@ -397,7 +327,6 @@ class TestMultiDatalabRouting:
         assert (
             daemon._clients_by_wp["wp-b"].datalab_api_url == "https://south.example.org"
         )
-        # Each datalab built exactly once.
         assert sorted(constructed) == [
             "https://north.example.org",
             "https://south.example.org",
@@ -413,7 +342,6 @@ class TestMultiDatalabRouting:
         config = helper._make_config(tmp_path, tmp_tree)
         transport = MockTransport()
         daemon = helper._make_daemon(config, transport, monkeypatch)
-        daemon._watcher = None
         daemon._last_push_mono = 0.0
         daemon._last_poll_mono = float("inf")  # skip poll branch
 
