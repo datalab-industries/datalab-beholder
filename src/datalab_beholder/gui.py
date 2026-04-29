@@ -583,7 +583,7 @@ class SettingsDialog(tk.Toplevel):
 
         self._datalab_rows: list[dict] = []
         for d in self._config.datalabs:
-            self._add_datalab_row(d.name, d.url, d.api_key)
+            self._add_datalab_row(d.name, d.url, d.api_key or "")
 
         tk.Button(
             self,

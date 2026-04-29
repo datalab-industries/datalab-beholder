@@ -81,7 +81,16 @@ def scan(
         config = load_config(config_path)
 
     if config:
+        from datalab_beholder.config import LocalWatchedPath
+
         for d in config.watched_paths:
+            if not isinstance(d, LocalWatchedPath):
+                click.echo(
+                    f"Skipping non-local watched path {d.name!r} (kind={d.kind!r}); "
+                    "only local paths are scannable from the CLI today.",
+                    err=True,
+                )
+                continue
             result = scan_directory(
                 root=d.path,
                 name=d.name,
@@ -203,11 +212,17 @@ def status(config_path: Path | None) -> None:
         click.echo("No state database found. Has the daemon been run?")
         return
 
+    from datalab_beholder.config import LocalWatchedPath
+
     state = StateStore(config.state_db)
     try:
         for wp in config.watched_paths:
-            click.echo(f"\n{wp.name} ({wp.path})")
-            click.echo(f"  Path exists: {wp.path.exists()}")
+            location = str(getattr(wp, "path", wp.kind))
+            click.echo(f"\n{wp.name} ({location})")
+            if isinstance(wp, LocalWatchedPath):
+                click.echo(f"  Path exists: {wp.path.exists()}")
+            else:
+                click.echo(f"  Kind: {wp.kind} (presence not checked)")
 
             last_sync = state.get_last_sync(wp.name)
             if last_sync:
