@@ -40,6 +40,8 @@ class TestBeholderDaemon:
         from datalab_beholder.state import StateStore
 
         daemon._state = StateStore(config.state_db)
+        for wp in config.watched_paths:
+            daemon._state.register_watched_path(wp.name)
         client = _make_beholder_client(mock_transport, monkeypatch)
         daemon._clients = {d.name: client for d in config.datalabs}
         daemon._clients_by_wp = {wp.name: client for wp in config.watched_paths}

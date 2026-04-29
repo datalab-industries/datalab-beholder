@@ -41,6 +41,8 @@ class BeholderDaemon:
         self._config = config
         self._running = False
         self._state = StateStore(config.state_db)
+        for wp in config.watched_paths:
+            self._state.register_watched_path(wp.name)
 
         self._clients: dict[str, BeholderClient] = self._build_clients(config)
         # Routing table: each watched path resolves to exactly one client.
@@ -118,9 +120,14 @@ class BeholderDaemon:
         self._initial_scan()
         self.last_scan_time = time.time()
 
-        # 2. Start filesystem watcher
+        # 2. Start filesystem watcher (local paths only; SSH/Cloud will be
+        #    handled by the layered scan loop in the next refactor)
+        from datalab_beholder.config import LocalWatchedPath
+
         self._watcher = DirectoryWatcher(self._state)
         for wp in self._config.watched_paths:
+            if not isinstance(wp, LocalWatchedPath):
+                continue
             if wp.path.exists():
                 self._watcher.watch(
                     path=wp.path,
