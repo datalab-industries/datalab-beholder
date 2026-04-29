@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import signal
 import threading
 import time
@@ -78,29 +77,14 @@ class BeholderDaemon:
 
     @staticmethod
     def _build_clients(config: BeholderConfig) -> dict[str, BeholderClient]:
-        """Construct one BeholderClient per configured datalab.
-
-        BaseDatalabClient currently only reads the API key from the
-        DATALAB_API_KEY env var, so we mutate the env immediately before each
-        client construction. This will go away once BaseDatalabClient accepts
-        an explicit key.
-        """
-        previous = os.environ.get("DATALAB_API_KEY")
-        clients: dict[str, BeholderClient] = {}
-        try:
-            for d in config.datalabs:
-                if d.api_key:
-                    os.environ["DATALAB_API_KEY"] = d.api_key
-                clients[d.name] = BeholderClient(
-                    datalab_api_url=d.url,
-                    log_level=config.log_level,
-                )
-        finally:
-            if previous is None:
-                os.environ.pop("DATALAB_API_KEY", None)
-            else:
-                os.environ["DATALAB_API_KEY"] = previous
-        return clients
+        """Construct one BeholderClient per configured datalab."""
+        return {
+            d.name: BeholderClient(
+                datalab_api_url=d.url,
+                log_level=config.log_level,
+            )
+            for d in config.datalabs
+        }
 
     def _build_daemon_id(self) -> str:
         """Build a daemon ID from watched path names."""

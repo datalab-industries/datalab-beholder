@@ -10,7 +10,6 @@ from pydantic import ValidationError
 from datalab_beholder.config import (
     ALLOWED_ID_GROUPS,
     BeholderConfig,
-    DatalabConfig,
     WatchedPath,
 )
 
@@ -279,32 +278,3 @@ class TestDatalabRefValidation:
         )
         assert cfg.watched_paths[0].datalab == "a"
         assert cfg.watched_paths[1].datalab == "b"
-
-
-class TestApiKeyResolution:
-    def test_per_instance_env_var_wins(self, monkeypatch) -> None:
-        monkeypatch.setenv("FOO_DATALAB_API_KEY", "from-foo")
-        monkeypatch.setenv("DATALAB_API_KEY", "from-shared")
-        d = DatalabConfig(name="foo", url="https://x.example.org", api_key="")
-        assert d.api_key == "from-foo"
-
-    def test_shared_env_var_fallback(self, monkeypatch) -> None:
-        monkeypatch.delenv("BAR_DATALAB_API_KEY", raising=False)
-        monkeypatch.setenv("DATALAB_API_KEY", "shared")
-        d = DatalabConfig(name="bar", url="https://x.example.org", api_key="")
-        assert d.api_key == "shared"
-
-    def test_yaml_literal_kept_when_no_env(self, monkeypatch) -> None:
-        monkeypatch.delenv("BAZ_DATALAB_API_KEY", raising=False)
-        monkeypatch.delenv("DATALAB_API_KEY", raising=False)
-        d = DatalabConfig(
-            name="baz", url="https://x.example.org", api_key="literal-key"
-        )
-        assert d.api_key == "literal-key"
-
-    def test_placeholder_treated_as_empty(self, monkeypatch) -> None:
-        monkeypatch.setenv("QUX_DATALAB_API_KEY", "from-env")
-        d = DatalabConfig(
-            name="qux", url="https://x.example.org", api_key="your-api-key-here"
-        )
-        assert d.api_key == "from-env"

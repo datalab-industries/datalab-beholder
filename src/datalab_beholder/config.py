@@ -133,22 +133,15 @@ class DatalabConfig(BaseModel):
         ...,
         description="Base URL of the datalab instance, e.g. https://datalab.example.org",
     )
-    api_key: str = Field(
-        ...,
-        description="API key for authenticating to the datalab instance (or set <PREFIX>_DATALAB_API_KEY env var)",
+    api_key: str | None = Field(
+        None,
+        description=(
+            "API key for authenticating to the datalab instance. If unset, "
+            "the underlying datalab client looks it up from the appropriate "
+            "<PREFIX>_DATALAB_API_KEY env var, where <PREFIX> matches the "
+            "deployment's identifier prefix."
+        ),
     )
-
-    @model_validator(mode="after")
-    def resolve_api_key(self) -> DatalabConfig:
-        if self.api_key and self.api_key != "your-api-key-here":
-            return self
-        # Per-instance env var takes precedence; fall back to the shared one.
-        per_instance = os.environ.get(f"{self.name.upper()}_DATALAB_API_KEY", "")
-        shared = os.environ.get("DATALAB_API_KEY", "")
-        resolved = per_instance or shared
-        if resolved:
-            self.api_key = resolved.strip("'").strip('"')
-        return self
 
 
 class BeholderConfig(BaseModel):
