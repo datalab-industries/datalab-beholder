@@ -229,7 +229,6 @@ def scan_directory(
                         log.debug(
                             "%s does not match ID patterns, skipping",
                             rel_path,
-                            id_patterns,
                         )
                         continue
 
