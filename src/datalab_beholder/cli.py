@@ -89,6 +89,8 @@ def scan(
             ],
         )
 
+    indent = 2 if pretty else None
+
     if config:
         from datalab_beholder.config import LocalWatchedPath
 
@@ -106,8 +108,11 @@ def scan(
                 include_patterns=d.include_patterns,
                 exclude_patterns=d.exclude_patterns,
                 id_patterns=d.id_patterns,
+                item_id_template=d.item_id_template,
+                collection_id_template=d.collection_id_template,
                 max_depth=d.max_depth,
             )
+            click.echo(json.dumps(result.to_dict(), indent=indent))
     else:
         result = scan_directory(
             root=path,
@@ -116,9 +121,7 @@ def scan(
             exclude_patterns=list(exclude),
             max_depth=max_depth,
         )
-
-    indent = 2 if pretty else None
-    click.echo(json.dumps(result.to_dict(), indent=indent))
+        click.echo(json.dumps(result.to_dict(), indent=indent))
 
 
 @main.command()
