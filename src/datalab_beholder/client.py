@@ -94,8 +94,8 @@ class BeholderClient(DatalabClient):
             created = super().create_item(
                 item_id=item_id,
                 item_type=item_type,
-                collection_id=collection_id,
-                group_ids=group_id,
+                collection_ids=[collection_id] if collection_id else None,
+                group_ids=[group_id] if group_id else None,
             )
         except DatalabAPIError as e:
             log.error("Failed to create item %s: %s", item_id, e)
