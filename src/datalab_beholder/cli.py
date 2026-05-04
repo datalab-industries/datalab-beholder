@@ -156,6 +156,10 @@ def start(config_path: Path | None, log_level: str | None) -> None:
                 config.state_db.parent / "beholder.log",
                 maxBytes=5 * 1024 * 1024,
                 backupCount=3,
+                # Pin UTF-8 so non-ASCII characters in messages don't blow
+                # up on Windows installs (default `cp1252` can't encode
+                # things like en-dashes or arrows).
+                encoding="utf-8",
             ),
         ],
     )

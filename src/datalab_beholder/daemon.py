@@ -344,7 +344,7 @@ class BeholderDaemon:
                 if result is not None:
                     synced.append(entry.path)
                     log.info(
-                        "Attached %s → item %s%s",
+                        "Attached %s -> item %s%s",
                         entry.path,
                         item_id,
                         f" (replaced file {replace_id})" if replace_id else "",
