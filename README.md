@@ -10,21 +10,18 @@
 
 > ⚠️ **Under construction.** APIs, config shape, and server endpoints are still in flux. Not yet recommended for production deployments.
 
-A daemon that watches instrument directories and syncs file metadata to one or more [*datalab*](https://github.com/datalab-org/datalab) instances. Researchers see available files in the datalab UI in near-real-time and can request specific files for transfer — without exposing instrument PCs to the internet.
-
-Two modes of operation, which can be combined per watched path:
-
-- **Metadata exposure** — surface every matching file in the *datalab* UI as a browsable listing; users request files on demand and the daemon uploads them.
-- **Direct attach** — extract a datalab `item_id` from each file path with a regex (`id_patterns`) and have the daemon push the file straight onto that item as it appears, no user action required.
+A daemon that watches instrument directories and attaches matching files to items in one or more [*datalab*](https://github.com/datalab-org/datalab) instances. The daemon extracts a datalab `item_id` from each file path with a regex, creates the item on the server if it doesn't already exist, and uploads the file to it — replacing in place if a same-named attachment is already there. Network traffic is outbound only; no inbound firewall rules are needed on the instrument PC.
 
 ## How it works
 
-1. **Startup**: a full scan of each watched directory seeds a local SQLite state database, then pushes the initial snapshot to the datalab server.
-2. **Watching**: a `watchdog`-based filesystem watcher detects creates, modifications, and deletions in real-time and updates the local state. Events are debounced (5 s window) to avoid thrashing during bulk writes.
-3. **Push loop**: on a configurable interval (default 20 min), accumulated changes are read from local state and pushed to the server. No re-scanning happens here — the watcher keeps state up to date.
-4. **File request loop**: on a separate interval (default 60 s), the daemon polls the server for files that users have requested through the datalab UI, then uploads them.
+The daemon runs a single-threaded `tick()` loop that drives three independent scan tiers per watched path plus an attach pass:
 
-All network traffic is outbound only — no inbound firewall rules are needed on the instrument PC.
+1. **Cold scan** *(default: every 24 h)* — full directory walk; ground-truth reconciliation against the state DB.
+2. **Warm scan** *(every 1 h)* — directory-mtime-aware walk; discovers new files in active subtrees, skips per-file stats in cold subtrees.
+3. **Hot scan** *(every 60 s)* — re-stats only files modified in the last `hot_window` seconds; cheap and frequent.
+4. **Attach pass** *(every 20 min)* — for every file pending in state with an `item_id` extracted, ensure the datalab item exists then upload the file (with `replace_file_id` set if a same-named attachment is already there).
+
+Each tier writes its findings into a local SQLite state DB; the attach pass drains whatever is pending. Cold can be disabled (`cold_interval: null`) for write-once archives.
 
 ## Installation
 
@@ -49,27 +46,23 @@ datalabs:
     api_key: "your-api-key-here"   # or omit and use a <PREFIX>_DATALAB_API_KEY env var
 
 watched_paths:
-  # Plain metadata-exposure path: files appear in the UI for users to request.
-  - path: "/mnt/instrument/data"
-    name: "XRD-Lab-A"
-    datalab: "main"
-    include_patterns: ["*.raw", "*.csv"]
-    exclude_patterns: ["*.tmp"]
-    max_depth: null
-
-  # Direct-attach path: files are auto-attached to existing items via item_id
-  # extracted from the file path.
-  - path: "/mnt/instrument/echem"
+  - kind: "local"
+    path: "/mnt/instrument/echem"
     name: "digibat"
     datalab: "main"
     item_type: "cells"
     include_patterns: ["*.mpr"]
     id_patterns:
-      - "^(?P<group_id>P[0-9]{3,4})/(?P<item_id>[0-9]+)[-_].*\\.mpr$"
+      # `\D*\.mpr$` anchors the capture on the *last* digit run before
+      # the extension, so subdirectories of arbitrary depth are fine.
+      - "^(?P<group_id>P[0-9]{3,})/.*?(?P<item_id>[0-9]+)\\D*\\.mpr$"
+    # Optional templates that turn capture groups into the values the
+    # daemon actually sends to datalab. Resolved at scan time.
+    item_id_template: "{group_id}-{item_id}"
+    # collection_id_template: "{group_id}"
 
 sync:
-  metadata_interval: 1200   # push changes every 20 minutes
-  file_request_poll: 60     # check for file requests every minute
+  metadata_interval: 1200   # attach pending files every 20 minutes
 
 log_level: info
 ```
@@ -78,25 +71,37 @@ Multiple `datalabs` entries are supported; each `watched_paths[].datalab` field 
 
 ### Direct attach via `id_patterns`
 
-`id_patterns` is a list of Python regexes with named capture groups. Each file path (relative to the watched root) is tested against the patterns; the first match wins, and its captured groups are attached to the file entry. Allowed group names are:
+`id_patterns` is a list of Python regexes with named capture groups. Each file path (relative to the watched root) is tested against the patterns; the first match wins, and its captured groups become the file's identity for the rest of the pipeline. Allowed group names are:
 
-- `item_id` — **required** in every pattern; identifies the existing datalab item to attach to.
-- `group_id` — optional; the parent group/project on the datalab side.
-- `collection_id` — optional; a collection identifier.
+- `item_id` — **required** in every pattern; the datalab item the file attaches to.
+- `group_id` — optional; passed as `group_ids` when the daemon creates the item (access control).
+- `collection_id` — optional; passed as `collection_ids` when the daemon creates the item.
 
-Files that don't match any pattern are silently skipped from the direct-attach path. Combine with `item_type` to scope what kind of item the daemon attaches files to.
+Files that don't match any pattern are skipped silently. Set `item_type` to let the daemon create items that don't yet exist; without it the daemon only attaches to items that are already there.
 
-Start the daemon:
+#### Templating ids from capture groups
+
+`item_id_template` and `collection_id_template` are optional Python `str.format` strings that compose the values *actually sent* to the server out of the regex's capture groups. They're resolved at scan time, so the resolved id lands in the state DB and is what the `scan` CLI prints — what you see is what the daemon will create.
+
+Example: `id_patterns: ["^(?P<group_id>P[0-9]+)/(?P<item_id>[0-9]+)-.*\\.mpr$"]` with `item_id_template: "{group_id}-{item_id}"` turns `P042/7-cycle.mpr` into a request for an item called `P042-7`.
+
+If a template references a capture group the regex didn't produce, the file is skipped with a warning rather than crashing the attach pass.
+
+### Running
+
+`start` is the default command, so the bare invocation runs the daemon:
 
 ```
-datalab-beholder start
+datalab-beholder
 ```
 
-To use a config file in a different location:
+To point at a non-default config:
 
 ```
-datalab-beholder start --config /path/to/config.yaml
+datalab-beholder --config /path/to/config.yaml
 ```
+
+(Equivalent to `datalab-beholder start --config ...`.)
 
 ## CLI reference
 
@@ -110,7 +115,7 @@ datalab-beholder init --path ./my-config.yaml
 
 ### `datalab-beholder start`
 
-Starts the daemon. Blocks until interrupted (Ctrl+C / SIGTERM).
+Starts the daemon. Blocks until interrupted (Ctrl+C / SIGTERM). This is the default command — running `datalab-beholder` with no subcommand is equivalent.
 
 ```
 datalab-beholder start [--config PATH] [--log-level debug|info|warning|error]
@@ -118,9 +123,14 @@ datalab-beholder start [--config PATH] [--log-level debug|info|warning|error]
 
 ### `datalab-beholder scan`
 
-One-off directory scan — useful for testing your patterns before running the daemon.
+One-off directory scan — useful for testing your patterns and id templates before running the daemon. With `--config`, scans every `watched_paths[]` entry and prints one JSON object per line per path; without `--config`, takes ad-hoc args.
 
 ```
+# Use the same config the daemon would use — handy for verifying that
+# id_patterns + templates resolve to what you expect.
+datalab-beholder scan --config ./config.yaml . --pretty
+
+# Or ad-hoc:
 datalab-beholder scan /mnt/instrument/data \
   --name "XRD-Lab-A" \
   --include "*.raw" --include "*.csv" \
@@ -129,7 +139,7 @@ datalab-beholder scan /mnt/instrument/data \
   --pretty
 ```
 
-Outputs structured JSON describing the directory contents.
+The JSON includes each entry's resolved `ids` dict (capture groups + templated `item_id`/`collection_id`) — that's exactly what the daemon will use.
 
 ### `datalab-beholder status`
 
@@ -169,13 +179,31 @@ The resulting binary in `dist/` launches the GUI and reads `config.yaml` from th
 | `watched_paths[]` | `datalab` | *(required if >1 datalab)* | Name of the datalab instance to push to |
 | `watched_paths[]` | `include_patterns` | `["*"]` | Glob patterns for files to include |
 | `watched_paths[]` | `exclude_patterns` | `[]` | Glob patterns for files to exclude |
-| `watched_paths[]` | `id_patterns` | `[]` | Regexes with named `item_id`/`group_id`/`collection_id` groups for direct attach |
-| `watched_paths[]` | `item_type` | `null` | Datalab item type for direct attach (e.g. `cells`, `samples`) |
+| `watched_paths[]` | `id_patterns` | `[]` | Regexes with named `item_id`/`group_id`/`collection_id` groups |
+| `watched_paths[]` | `item_id_template` | `null` | `str.format` template, e.g. `"{group_id}-{item_id}"` |
+| `watched_paths[]` | `collection_id_template` | `null` | `str.format` template for the collection id |
+| `watched_paths[]` | `item_type` | `null` | Datalab item type; required to auto-create missing items |
 | `watched_paths[]` | `max_depth` | `10` | Max directory traversal depth |
-| `sync` | `metadata_interval` | `1200` | Seconds between metadata pushes |
-| `sync` | `file_request_poll` | `60` | Seconds between file request polls |
+| `watched_paths[]` | `scan.hot_interval` | `60` | Seconds between hot scans (recently-modified file re-stat) |
+| `watched_paths[]` | `scan.warm_interval` | `3600` | Seconds between warm scans (directory-mtime walk) |
+| `watched_paths[]` | `scan.cold_interval` | `86400` | Seconds between cold scans (full walk); `null` disables |
+| `watched_paths[]` | `scan.hot_window` | `86400` | "Recent" cutoff (s) for hot-scan eligibility |
+| `sync` | `metadata_interval` | `1200` | Seconds between attach passes |
 | | `log_level` | `info` | Logging verbosity |
 | | `state_db` | next to package/exe | Path to the local SQLite database |
+
+## Roadmap
+
+The 0.1.x version ships only the **direct-attach** mode described above. A second mode is planned for a future release:
+
+- **Metadata-exposure mode** — surface every matching file in the *datalab* UI as a browsable listing without uploading anything. Users browse the listing and request specific files on demand; the daemon then uploads only the requested ones. Useful when watched directories are large or contain files that shouldn't be uploaded by default. This requires server-side endpoints that don't yet exist on the *datalab* side, and will land alongside them.
+
+Other things on the list:
+
+- **SSH and cloud-storage watched paths.** The config schema already discriminates on `kind` (`local` / `ssh` / `cloud`); only `local` is implemented today.
+- **CI integration of the 3-stage example** in `example/run_example.py` against a throwaway datalab instance.
+
+Issues and design discussion welcome — file them at [github.com/datalab-org/datalab-beholder/issues](https://github.com/datalab-org/datalab-beholder/issues).
 
 ## Development
 
