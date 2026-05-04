@@ -101,12 +101,45 @@ def _match_id_patterns(
     return None
 
 
+def _apply_id_templates(
+    ids: dict[str, str],
+    item_id_template: str | None,
+    collection_id_template: str | None,
+    rel_path: str,
+) -> dict[str, str] | None:
+    """Render ``item_id`` / ``collection_id`` from capture groups.
+
+    Mutates a copy of ``ids`` so the resolved values land in the state DB
+    and can be logged at scan time. Returns None if a template references
+    a capture group the regex didn't produce — the file is then skipped
+    just like an unmatched ``id_pattern`` would skip it.
+    """
+    if not (item_id_template or collection_id_template):
+        return ids
+    out = dict(ids)
+    try:
+        if item_id_template:
+            out["item_id"] = item_id_template.format(**ids)
+        if collection_id_template:
+            out["collection_id"] = collection_id_template.format(**ids)
+    except KeyError as e:
+        log.warning(
+            "Skipping %s: id template references missing capture group %s",
+            rel_path,
+            e,
+        )
+        return None
+    return out
+
+
 def scan_directory(
     root: Path,
     name: str = "",
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     id_patterns: list[str] | None = None,
+    item_id_template: str | None = None,
+    collection_id_template: str | None = None,
     max_depth: int | None = None,
     skip_dirs: bool = True,
 ) -> ScanResult:
@@ -200,6 +233,12 @@ def scan_directory(
                         )
                         continue
 
+                    ids = _apply_id_templates(
+                        ids, item_id_template, collection_id_template, rel_path
+                    )
+                    if ids is None:
+                        continue
+
                     total_files += 1
                     total_size += stat.st_size
                     entries.append(
@@ -234,6 +273,8 @@ def warm_scan_directory(
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     id_patterns: list[str] | None = None,
+    item_id_template: str | None = None,
+    collection_id_template: str | None = None,
     max_depth: int | None = None,
     since_mtime: float | None = None,
 ) -> WarmScanResult:
@@ -324,6 +365,11 @@ def warm_scan_directory(
                 ids = _match_id_patterns(rel_path, compiled_id_patterns)
                 if ids is None:
                     continue
+                ids = _apply_id_templates(
+                    ids, item_id_template, collection_id_template, rel_path
+                )
+                if ids is None:
+                    continue
 
                 try:
                     stat = entry.stat(follow_symlinks=False)
@@ -355,6 +401,8 @@ def hot_stat_paths(
     root: Path,
     paths: list[str],
     id_patterns: list[str] | None = None,
+    item_id_template: str | None = None,
+    collection_id_template: str | None = None,
 ) -> tuple[list[FileEntry], list[str]]:
     """Stat each `path` (relative to `root`) directly.
 
@@ -387,6 +435,10 @@ def hot_stat_paths(
             continue
 
         ids = _match_id_patterns(rel, compiled)
+        if ids is not None:
+            ids = _apply_id_templates(
+                ids, item_id_template, collection_id_template, rel
+            )
         survived.append(
             FileEntry(
                 path=rel,

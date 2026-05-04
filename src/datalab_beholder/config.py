@@ -214,7 +214,11 @@ class LocalWatchedPath(WatchedPathBase):
         cutoff = _now() - self.scan.hot_window
         candidate_paths = state.recently_modified_paths(self.name, since=cutoff)
         survived, missing = hot_stat_paths(
-            self.path, candidate_paths, id_patterns=self.id_patterns
+            self.path,
+            candidate_paths,
+            id_patterns=self.id_patterns,
+            item_id_template=self.item_id_template,
+            collection_id_template=self.collection_id_template,
         )
         diff = state.update_from_targeted_stats(self.name, survived, missing)
         state.update_scan_timestamp(self.name, "hot", _now())
@@ -232,6 +236,8 @@ class LocalWatchedPath(WatchedPathBase):
             include_patterns=self.include_patterns,
             exclude_patterns=self.exclude_patterns,
             id_patterns=self.id_patterns,
+            item_id_template=self.item_id_template,
+            collection_id_template=self.collection_id_template,
             max_depth=self.max_depth,
             since_mtime=ts.max_dir_mtime,
         )
@@ -255,6 +261,8 @@ class LocalWatchedPath(WatchedPathBase):
             include_patterns=self.include_patterns,
             exclude_patterns=self.exclude_patterns,
             id_patterns=self.id_patterns,
+            item_id_template=self.item_id_template,
+            collection_id_template=self.collection_id_template,
             max_depth=self.max_depth,
             skip_dirs=False,
         )

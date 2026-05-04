@@ -470,7 +470,150 @@ class TestE2EAttachFlow:
         assert len(captured) == 1
         assert captured[0]["item_id"] == "7"
         assert captured[0]["item_type"] == "cells"
-        assert captured[0]["group_ids"] == "P042"
+        assert captured[0]["group_ids"] == ["P042"]
+
+    def test_item_id_template_constructs_id_from_capture_groups(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`item_id_template` joins capture groups before talking to the
+        server. With ``{group_id}-{item_id}``, the regex pulls
+        ``group_id=P042`` and ``item_id=7`` and the daemon must address
+        the item as ``P042-7``."""
+        data = tmp_path / "data"
+        (data / "P042").mkdir(parents=True)
+        (data / "P042" / "7-cycle.mpr").write_bytes(b"\x00" * 8)
+
+        config = BeholderConfig(
+            datalabs=[
+                {
+                    "name": "test",
+                    "url": "https://test.example.org",
+                    "api_key": "test-key",
+                }
+            ],
+            watched_paths=[
+                {
+                    "path": str(data),
+                    "name": "cells",
+                    "item_type": "cells",
+                    "include_patterns": ["*.mpr"],
+                    "id_patterns": [
+                        r"^(?P<group_id>P[0-9]+)/(?P<item_id>[0-9]+)-.*\.mpr$"
+                    ],
+                    "item_id_template": "{group_id}-{item_id}",
+                    "scan": {
+                        "hot_interval": 0,
+                        "warm_interval": 0,
+                        "cold_interval": 0,
+                    },
+                }
+            ],
+            sync={"metadata_interval": 0},
+            state_db=tmp_path / "state.db",
+        )
+
+        transport = MockTransport()
+        transport.add_response(
+            "GET", "/get-item-data/P042-7", status_code=404, json_data={}
+        )
+        transport.add_response(
+            "POST",
+            "/new-sample/",
+            status_code=201,
+            json_data={"sample_list_entry": {"item_id": "P042-7"}},
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f1"},
+        )
+
+        from datalab_api import DatalabClient
+
+        captured: list[dict] = []
+
+        def fake_create(self, **kwargs):
+            captured.append(kwargs)
+            return {"item_id": kwargs.get("item_id"), "files": []}
+
+        monkeypatch.setattr(DatalabClient, "create_item", fake_create)
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        # The probe must address the templated id, not the raw capture.
+        assert ("GET", "/get-item-data/P042-7") in [
+            (r.method, r.url.path) for r in transport.requests
+        ]
+        assert not any(r.url.path == "/get-item-data/7" for r in transport.requests)
+        assert len(captured) == 1
+        assert captured[0]["item_id"] == "P042-7"
+
+    def test_collection_id_template_forwarded_to_create_item(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """`collection_id_template` builds a collection id from capture
+        groups and is forwarded into ``create_item`` as ``collection_ids``."""
+        data = tmp_path / "data"
+        (data / "P042").mkdir(parents=True)
+        (data / "P042" / "9-cycle.mpr").write_bytes(b"\x00" * 8)
+
+        config = BeholderConfig(
+            datalabs=[
+                {
+                    "name": "test",
+                    "url": "https://test.example.org",
+                    "api_key": "test-key",
+                }
+            ],
+            watched_paths=[
+                {
+                    "path": str(data),
+                    "name": "cells",
+                    "item_type": "cells",
+                    "include_patterns": ["*.mpr"],
+                    "id_patterns": [
+                        r"^(?P<group_id>P[0-9]+)/(?P<item_id>[0-9]+)-.*\.mpr$"
+                    ],
+                    "collection_id_template": "group-{group_id}",
+                    "scan": {
+                        "hot_interval": 0,
+                        "warm_interval": 0,
+                        "cold_interval": 0,
+                    },
+                }
+            ],
+            sync={"metadata_interval": 0},
+            state_db=tmp_path / "state.db",
+        )
+
+        transport = MockTransport()
+        transport.add_response("GET", "/get-item-data/9", status_code=404, json_data={})
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f1"},
+        )
+
+        from datalab_api import DatalabClient
+
+        captured: list[dict] = []
+
+        def fake_create(self, **kwargs):
+            captured.append(kwargs)
+            return {"item_id": kwargs.get("item_id"), "files": []}
+
+        monkeypatch.setattr(DatalabClient, "create_item", fake_create)
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        assert len(captured) == 1
+        assert captured[0]["collection_ids"] == ["group-P042"]
 
     def test_failed_upload_leaves_entry_unsynced_for_retry(
         self, tmp_path: Path, monkeypatch
