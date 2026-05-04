@@ -40,9 +40,21 @@ watched_paths:
     path: "/path/to/instrument/data"
     name: "Instrument-Name"
     datalab: "example"
+    item_type: "cells"            # datalab item type for newly-created items
     include_patterns:
-      - "*"
+      - "*.mpr"
     exclude_patterns: []
+    # Regex with named capture groups (`item_id`, `group_id`, `collection_id`).
+    # Files that don't match are skipped. The `\\D*\\.mpr$` tail forces the
+    # regex to land on the *last* digit run before the extension regardless
+    # of subdirectory depth.
+    id_patterns:
+      - "^(?P<group_id>P[0-9]{3,})/.*?(?P<item_id>[0-9]+)\\\\D*\\\\.mpr$"
+    # Optional templates: render the values that actually get sent to the
+    # server from the capture groups. Resolved at scan time, so the
+    # `state.db` and `scan` CLI output show what the daemon will create.
+    item_id_template: "{group_id}-{item_id}"
+    # collection_id_template: "{group_id}"
     # max_depth: null  # unlimited
     # scan:
     #   hot_interval: 60        # stat recently-modified files
