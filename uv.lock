@@ -93,13 +93,17 @@ wheels = [
 
 [[package]]
 name = "datalab-api"
-version = "0.4.0.post4+g3c1521a"
-source = { git = "https://github.com/datalab-org/datalab-api#3c1521a9604a60aad89fcd03dcc173a0a47e14ff" }
+version = "0.5.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bokeh", marker = "sys_platform != 'emscripten'" },
     { name = "httpx" },
     { name = "numpy" },
     { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/62/94/1aac612119bee191eea18db191a3f682fd52538dff6bc74ec5fe0db5e58d/datalab_api-0.5.0.tar.gz", hash = "sha256:9f473b3534c2f4cee1ecc047b8654bc3a034e8bddd1a0eb3a17a7b15b7e7cffa", size = 21282, upload-time = "2026-05-04T21:41:47.576Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/0e/e2e097df29d7f47b22e6318f1ded3d393abb8c6ac8c54ba5cbcfc9135024/datalab_api-0.5.0-py3-none-any.whl", hash = "sha256:f593167e65417afc8b421b834d5a6421430c4a9efadfe49d4708e15c01b8a1c0", size = 18116, upload-time = "2026-05-04T21:41:46.087Z" },
 ]
 
 [[package]]
@@ -123,7 +127,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = "~=8.3" },
-    { name = "datalab-api", git = "https://github.com/datalab-org/datalab-api" },
+    { name = "datalab-api", specifier = "~=0.5" },
     { name = "pydantic", specifier = "~=2.12" },
     { name = "pyyaml", specifier = "~=6.0" },
 ]
