@@ -1,4 +1,4 @@
-"""Main daemon loop for metadata sync and file upload."""
+"""Main daemon loop: scan watched paths, attach matched files to items."""
 
 from __future__ import annotations
 
@@ -18,11 +18,11 @@ TICK_SECONDS = 1.0
 
 
 class BeholderDaemon:
-    """Daemon that scans watched paths on layered cadences and pushes
-    accumulated metadata to one or more datalab instances.
+    """Daemon that scans watched paths on layered cadences and attaches
+    files whose path matched an ``id_pattern`` to their datalab item.
 
-    Single-threaded by design — `tick()` runs all scan + push + poll work
-    on the calling thread, so SQLite never crosses thread boundaries and
+    Single-threaded by design — `tick()` runs all scan + attach work on
+    the calling thread, so SQLite never crosses thread boundaries and
     the loop is safe to drive from a CLI sleep loop or a Tkinter
     `root.after` callback.
 
@@ -34,8 +34,9 @@ class BeholderDaemon:
     * **cold** — full walk; ground-truth reconciliation. Optional
       (`scan.cold_interval = null`) for write-once archives.
 
-    The push loop (`metadata_interval`) is independent of the scan loop:
-    scans accumulate diffs in state; pushes drain whatever's pending.
+    Attaching runs on its own cadence (``sync.metadata_interval``)
+    independent of the scan loop: scans accumulate diffs in state, the
+    attach pass drains whatever is pending and has an ``item_id``.
     """
 
     def __init__(self, config: BeholderConfig):
@@ -59,9 +60,9 @@ class BeholderDaemon:
 
         # Observable status for the GUI
         self.last_scan_time: float | None = None
-        self.last_push_time: float | None = None
+        self.last_attach_time: float | None = None
         self.pending_count: int = 0
-        self.sync_status: str = "idle"  # "idle" | "pushing" | "error"
+        self.sync_status: str = "idle"  # "idle" | "attaching" | "error"
 
     @property
     def config(self) -> BeholderConfig:
@@ -77,21 +78,39 @@ class BeholderDaemon:
 
     @staticmethod
     def _build_clients(config: BeholderConfig) -> dict[str, BeholderClient]:
-        return {
-            d.name: BeholderClient(
-                datalab_api_url=d.url,
-                log_level=config.log_level,
-            )
-            for d in config.datalabs
-        }
+        """Construct one client per configured datalab.
+
+        ``BaseDatalabClient`` reads its API key from the
+        ``DATALAB_API_KEY`` env var (or a deployment-prefixed variant)
+        during ``__init__``, so we set it from ``DatalabConfig.api_key``
+        per-construction. With multiple datalabs this just walks the
+        list and re-sets the env var each time — fine because each
+        client snapshots the key into its own ``_headers`` dict.
+        """
+        import os
+
+        clients: dict[str, BeholderClient] = {}
+        prev_env = os.environ.get("DATALAB_API_KEY")
+        try:
+            for d in config.datalabs:
+                if d.api_key and d.api_key != "your-api-key-here":
+                    os.environ["DATALAB_API_KEY"] = d.api_key
+                # Otherwise leave whatever was already in the env so
+                # users can keep their key out of the YAML entirely.
+                clients[d.name] = BeholderClient(
+                    datalab_api_url=d.url,
+                    log_level=config.log_level,
+                )
+        finally:
+            if prev_env is None:
+                os.environ.pop("DATALAB_API_KEY", None)
+            else:
+                os.environ["DATALAB_API_KEY"] = prev_env
+        return clients
 
     def _build_daemon_id(self) -> str:
         names = sorted(wp.name for wp in self._config.watched_paths)
         return "-".join(names).lower().replace(" ", "-")
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def setup(self) -> None:
         """Register signal handlers and initialise loop timers.
@@ -109,26 +128,21 @@ class BeholderDaemon:
                 for wp in self._config.watched_paths
             ),
         )
-        log.info(
-            "Push intervals: metadata=%ds, file_requests=%ds",
-            self._config.sync.metadata_interval,
-            self._config.sync.file_request_poll,
-        )
+        log.info("Attach interval: %ds", self._config.sync.metadata_interval)
 
         if threading.current_thread() is threading.main_thread():
             for sig in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(sig, self._handle_signal)
 
-        self._last_push_mono = time.monotonic()
-        self._last_poll_mono = time.monotonic()
+        self._last_attach_mono = time.monotonic()
         self._running = True
 
     def tick(self) -> None:
         """One iteration of the main loop.
 
         Per watched path: pick the highest-priority overdue scan tier
-        (cold > warm > hot) and run it. Then handle the push and
-        file-request loops on their independent cadences.
+        (cold > warm > hot) and run it. Then, on its own cadence, attach
+        any pending files whose path matched an ``item_id`` regex.
         """
         now_mono = time.monotonic()
         now_wall = time.time()
@@ -150,24 +164,16 @@ class BeholderDaemon:
                 log.exception("Error running %s scan for %s", kind, wp.name)
                 self.sync_status = "error"
 
-        if now_mono - self._last_push_mono >= self._config.sync.metadata_interval:
-            self.sync_status = "pushing"
+        if now_mono - self._last_attach_mono >= self._config.sync.metadata_interval:
+            self.sync_status = "attaching"
             try:
-                self._push_pending_changes()
                 self._attach_matched_files()
-                self.last_push_time = now_wall
+                self.last_attach_time = now_wall
                 self.sync_status = "idle"
             except Exception:
-                log.exception("Error in push loop")
+                log.exception("Error in attach loop")
                 self.sync_status = "error"
-            self._last_push_mono = now_mono
-
-        if now_mono - self._last_poll_mono >= self._config.sync.file_request_poll:
-            try:
-                self._poll_file_requests()
-            except Exception:
-                log.exception("Error in file-request poll loop")
-            self._last_poll_mono = now_mono
+            self._last_attach_mono = now_mono
 
         self._update_pending_count()
 
@@ -247,7 +253,7 @@ class BeholderDaemon:
             log.debug("%s scan of %s: no changes", kind, wp.name)
 
     # ------------------------------------------------------------------
-    # Push / poll
+    # Attach
     # ------------------------------------------------------------------
 
     def _update_pending_count(self) -> None:
@@ -256,102 +262,92 @@ class BeholderDaemon:
             total += len(self._state.get_pending_changes(wp.name))
         self.pending_count = total
 
-    def _push_pending_changes(self) -> None:
-        """Read accumulated changes from state and push to the server."""
+    def _attach_matched_files(self) -> None:
+        """Attach pending files whose path matched an ``item_id`` regex.
+
+        Per watched path:
+
+        1. Pull pending entries from state and keep the ones with
+           ``status in {new, modified}`` and ``ids["item_id"]`` set.
+        2. Per item id, fetch the item once (creating it if missing
+           and ``item_type`` is configured) and re-use that snapshot
+           for every file on that item — saves a round-trip per file
+           in the common case of many files sharing one item id.
+        3. For each attachable file, look up an existing attachment
+           with the same basename. If found, upload with
+           ``replace_file_id`` to overwrite in place; otherwise upload
+           as a new attachment.
+        4. Mark successful uploads synced. Failures are left un-synced
+           and retried on the next tick.
+
+        File uploads only support local paths today; SSH/Cloud entries
+        are skipped with a debug log until those backends grow upload
+        paths of their own.
+        """
         for wp in self._config.watched_paths:
-            try:
-                pending = self._state.get_pending_changes(wp.name)
-                if not pending:
-                    log.debug("No pending changes for %s", wp.name)
+            if not isinstance(wp, LocalWatchedPath):
+                log.debug("Skipping attach for %s: only local paths supported", wp.name)
+                continue
+
+            pending = self._state.get_pending_changes(wp.name)
+            attachable = [
+                e
+                for e in pending
+                if e.status in ("new", "modified") and e.ids.get("item_id")
+            ]
+            if not attachable:
+                continue
+
+            client = self._client_for(wp)
+            log.info("Attaching %d file(s) for %s", len(attachable), wp.name)
+
+            # Per-pass cache: item_id → item dict (or None if the item
+            # couldn't be ensured). Avoids re-querying for each file on
+            # the same item.
+            item_cache: dict[str, dict[str, Any] | None] = {}
+
+            synced: list[str] = []
+            for entry in attachable:
+                file_path = wp.path / entry.path
+                item_id = entry.ids["item_id"]
+
+                if item_id not in item_cache:
+                    if wp.item_type:
+                        item_cache[item_id] = client.ensure_item(
+                            item_id=item_id,
+                            item_type=wp.item_type,
+                            collection_id=entry.ids.get("collection_id"),
+                            group_id=entry.ids.get("group_id"),
+                        )
+                    else:
+                        # No item_type configured → don't create, only
+                        # attach if the item already exists.
+                        item_cache[item_id] = client.fetch_item(item_id)
+
+                item = item_cache[item_id]
+                if item is None:
+                    log.warning(
+                        "Skipping %s: item %s not found and not creatable",
+                        entry.path,
+                        item_id,
+                    )
                     continue
 
-                log.info("Pushing %d pending entries for %s", len(pending), wp.name)
-                entries = [
-                    {
-                        "path": e.path,
-                        "size": e.size,
-                        "modified": e.modified,
-                        "is_directory": e.is_directory,
-                        "status": e.status,
-                    }
-                    for e in pending
-                ]
-
-                success = self._client_for(wp).push_metadata(
-                    daemon_id=self._daemon_id,
-                    entries=entries,
-                    snapshot_type="diff",
-                )
-
-                self._state.log_sync(
-                    watched_path_name=wp.name,
-                    snapshot_type="diff",
-                    entries_sent=len(entries),
-                    success=success,
-                )
-
-                if success:
-                    self._state.mark_synced(wp.name, [e.path for e in pending])
-                    self._state.remove_deleted(wp.name)
-                    log.info("Pushed %d entries for %s", len(entries), wp.name)
-                else:
-                    log.warning("Failed to push changes for %s, will retry", wp.name)
-            except Exception:
-                log.exception("Error pushing changes for %s", wp.name)
-
-    def _poll_file_requests(self) -> None:
-        """Check every configured datalab for pending file requests."""
-        for datalab_name, client in self._clients.items():
-            try:
-                requests = client.poll_file_requests(self._daemon_id)
-            except Exception:
-                log.exception("Error polling file requests from %s", datalab_name)
-                continue
-            if not requests:
-                continue
-
-            log.info(
-                "Received %d file request(s) from %s",
-                len(requests),
-                datalab_name,
-            )
-            for req in requests:
-                try:
-                    self._handle_file_request(req, client)
-                except Exception:
-                    log.exception("Error handling file request %s", req.request_id)
-
-    def _handle_file_request(self, req: Any, client: BeholderClient) -> None:
-        """Find and upload a requested file using the originating client."""
-        for wp in self._config.watched_paths:
-            # File uploads only work for local paths today; SSH/Cloud will
-            # need their own upload paths when those backends land.
-            if not isinstance(wp, LocalWatchedPath):
-                continue
-            file_path = wp.path / req.path
-            if file_path.exists() and file_path.is_file():
-                log.info("Uploading %s (request %s)", req.path, req.request_id)
-                stat = file_path.stat()
-                success = client.upload_file(
-                    request_id=req.request_id,
+                replace_id = client.find_existing_file_id(item, file_path.name)
+                result = client.attach_file(
+                    item_id=item_id,
                     file_path=file_path,
-                    metadata={"size": stat.st_size, "modified": stat.st_mtime},
+                    replace_file_id=replace_id,
                 )
-                if success:
-                    log.info("Uploaded %s successfully", req.path)
-                else:
-                    log.warning("Failed to upload %s", req.path)
-                return
+                if result is not None:
+                    synced.append(entry.path)
+                    log.info(
+                        "Attached %s → item %s%s",
+                        entry.path,
+                        item_id,
+                        f" (replaced file {replace_id})" if replace_id else "",
+                    )
 
-        log.warning("Requested file not found: %s", req.path)
-
-    def _attach_matched_files(self) -> None:
-        """Attach pending files with an extracted item_id to their datalab item.
-
-        Body intentionally left as a stub for the user to fill in. Iterates
-        per watched path, picks the right client via :meth:`_client_for`,
-        reads pending entries via ``state.get_pending_changes``, filters for
-        ``e.ids.get("item_id")``, performs the upload, and on success calls
-        ``state.mark_synced`` for that path. Failures are left un-synced and
-        retried on the next tick.
-        """
+            if synced:
+                self._state.mark_synced(wp.name, synced)
+            self._state.remove_deleted(wp.name)
