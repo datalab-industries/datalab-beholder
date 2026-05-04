@@ -96,6 +96,9 @@ class MockTransport(httpx.BaseTransport):
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
+        # Force the (possibly streaming) body to materialise so tests can
+        # inspect `request.content` after the fact.
+        request.read()
         self.requests.append(request)
         key = f"{request.method} {request.url.path}"
         if key in self.responses:
