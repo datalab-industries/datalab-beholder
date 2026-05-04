@@ -33,7 +33,7 @@ class TestBeholderDaemon:
                     },
                 }
             ],
-            sync={"metadata_interval": 1, "file_request_poll": 1},
+            sync={"metadata_interval": 1},
             state_db=tmp_path / "state.db",
         )
 
@@ -55,7 +55,7 @@ class TestBeholderDaemon:
         daemon._daemon_id = daemon._build_daemon_id()
 
         daemon.last_scan_time = None
-        daemon.last_push_time = None
+        daemon.last_attach_time = None
         daemon.pending_count = 0
         daemon.sync_status = "idle"
 
@@ -78,7 +78,7 @@ class TestBeholderDaemon:
         daemon.setup()
 
         assert daemon._running is True
-        assert daemon._last_push_mono is not None
+        assert daemon._last_attach_mono is not None
         # No HTTP requests yet — scanning hasn't happened.
         assert transport.requests == []
 
@@ -95,7 +95,7 @@ class TestBeholderDaemon:
         daemon.tick()
 
         # Cold scan seeded state — there should be pending entries waiting
-        # for the next push.
+        # for the next attach pass.
         pending = daemon._state.get_pending_changes("test-data")
         assert len(pending) > 0
         ts = daemon._state.get_scan_timestamps("test-data")
@@ -123,8 +123,6 @@ class TestBeholderDaemon:
         daemon = self._make_daemon(config, transport, monkeypatch)
 
         wp = config.watched_paths[0]
-        # Bump cold to "right now" with a long-enough interval that nothing
-        # else is due.
         wp.scan.hot_interval = 10000
         wp.scan.warm_interval = 10000
         wp.scan.cold_interval = 10000
@@ -141,89 +139,12 @@ class TestBeholderDaemon:
 
         wp = config.watched_paths[0]
         wp.scan.cold_interval = None
-        # All NULL timestamps → falls through cold-disabled, picks warm.
         kind = daemon._select_scan_tier(wp, time.time())
         assert kind == "warm"
-
-    def test_push_pending_changes_pushes_accumulated_state(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        from datalab_beholder.scanner import FileEntry
-
-        daemon._state.upsert_entries(
-            "test-data",
-            [
-                FileEntry(
-                    path="watcher_new.csv",
-                    size=42,
-                    modified=9999.0,
-                    is_directory=False,
-                )
-            ],
-        )
-
-        daemon._push_pending_changes()
-
-        assert len(transport.requests) == 1
-
-    def test_push_pending_no_changes(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        transport = MockTransport()
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        daemon._push_pending_changes()
-        assert transport.requests == []
-
-    def test_file_request_handling(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        transport = MockTransport()
-        transport.add_response(
-            "GET",
-            "/api/remote-files/pending",
-            json_data={
-                "requests": [
-                    {"request_id": "req-1", "path": "file1.csv"},
-                ]
-            },
-        )
-        transport.add_response(
-            "POST",
-            "/api/remote-files/upload",
-            json_data={"status": "success"},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-
-        daemon._poll_file_requests()
-
-        # Should have polled + uploaded
-        assert len(transport.requests) == 2
 
     def test_daemon_stop(self, tmp_path: Path, tmp_tree: Path, monkeypatch) -> None:
         """Daemon should stop cleanly when stop() is called."""
         transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        transport.add_response(
-            "GET",
-            "/api/remote-files/pending",
-            json_data={"requests": []},
-        )
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
 
@@ -234,35 +155,6 @@ class TestBeholderDaemon:
         thread.join(timeout=5)
         assert not thread.is_alive()
 
-    def test_tick_pushes_when_interval_elapsed(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        transport = MockTransport()
-        transport.add_response(
-            "POST",
-            "/api/remote-files/metadata",
-            json_data={"status": "success"},
-        )
-        transport.add_response(
-            "GET",
-            "/api/remote-files/pending",
-            json_data={"requests": []},
-        )
-        config = self._make_config(tmp_path, tmp_tree)
-        daemon = self._make_daemon(config, transport, monkeypatch)
-        daemon.setup()
-        # First tick runs the cold scan, which seeds state.
-        daemon.tick()
-        transport.requests.clear()
-
-        # Force the push interval to have elapsed
-        daemon._last_push_mono = time.monotonic() - config.sync.metadata_interval - 1
-        daemon.tick()
-
-        push_requests = [r for r in transport.requests if r.method == "POST"]
-        assert len(push_requests) >= 1
-        assert daemon.last_push_time is not None
-
     def test_status_properties(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
@@ -272,6 +164,369 @@ class TestBeholderDaemon:
 
         assert daemon.config is config
         assert daemon.clients is daemon._clients
+
+
+# --------------------------------------------------------------------------
+# End-to-end attach flow (mock transport)
+# --------------------------------------------------------------------------
+
+
+def _attach_tree(tmp_path: Path) -> Path:
+    """Build a tree where one file matches an `item_id` regex.
+
+    Layout:
+        data/
+        ├── 42-cell-formation.mpr   ← matches `(?P<item_id>\\d+)-...`
+        └── notes.txt               ← no match, ignored
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "42-cell-formation.mpr").write_bytes(b"\x00" * 16)
+    (data / "notes.txt").write_text("ignore me")
+    return data
+
+
+def _attach_config(tmp_path: Path, root: Path) -> BeholderConfig:
+    return BeholderConfig(
+        datalabs=[
+            {
+                "name": "test",
+                "url": "https://test.example.org",
+                "api_key": "test-key",
+            }
+        ],
+        watched_paths=[
+            {
+                "path": str(root),
+                "name": "cells",
+                "item_type": "cells",
+                "include_patterns": ["*.mpr"],
+                "id_patterns": [r"^(?P<item_id>[0-9]+)-.*\.mpr$"],
+                "scan": {
+                    "hot_interval": 0,
+                    "warm_interval": 0,
+                    "cold_interval": 0,
+                },
+            }
+        ],
+        sync={"metadata_interval": 0},
+        state_db=tmp_path / "state.db",
+    )
+
+
+class TestE2EAttachFlow:
+    """Drive a tick-based scan → attach pipeline with a mock transport."""
+
+    def _make_daemon(self, config, transport, monkeypatch) -> BeholderDaemon:
+        helper = TestBeholderDaemon()
+        return helper._make_daemon(config, transport, monkeypatch)
+
+    def test_new_file_creates_item_and_uploads(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """item doesn't exist yet → create_item then upload-file (no replace)."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        # First get-item returns 404, then after create it returns the item.
+        transport.add_response(
+            "GET", "/get-item-data/42", status_code=404, json_data={}
+        )
+        transport.add_response(
+            "POST",
+            "/new-sample/",
+            status_code=201,
+            json_data={"sample_list_entry": {"item_id": "42"}},
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f1"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        # Cold scan + attach pass run in the same tick because both
+        # intervals are 0.
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        # We expect a get_item probe, the create-item POST, then
+        # (optionally) a re-fetch, then the upload.
+        assert ("POST", "/new-sample/") in methods
+        upload_calls = [m for m in methods if m == ("POST", "/upload-file/")]
+        assert len(upload_calls) == 1
+
+        # `get_pending_changes` returns only un-synced rows, so a successful
+        # attach should make the matched file disappear from that view.
+        pending = daemon._state.get_pending_changes("cells")
+        assert not any(e.path == "42-cell-formation.mpr" for e in pending)
+
+    def test_existing_item_with_matching_filename_replaces(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """item exists and already has a file of the same name →
+        upload-file is sent with replace_file set to that file's id."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [
+                        {"name": "42-cell-formation.mpr", "immutable_id": "old-id"},
+                        {"name": "other.mpr", "immutable_id": "irrelevant"},
+                    ],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f2"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        upload_reqs = [
+            r
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        ]
+        assert len(upload_reqs) == 1
+        # multipart body: replace_file appears as a form field.
+        body = upload_reqs[0].content
+        assert b"old-id" in body
+        # No create-item happened because the item already exists.
+        assert not any(
+            r.method == "POST" and r.url.path == "/new-sample/"
+            for r in transport.requests
+        )
+
+    def test_existing_item_no_matching_filename_uploads_as_new(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """item exists but has no file with that basename → upload as new
+        (replace_file is empty)."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [
+                        {"name": "different.mpr", "immutable_id": "other-id"},
+                    ],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f3"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        upload_reqs = [
+            r
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        ]
+        assert len(upload_reqs) == 1
+        body = upload_reqs[0].content
+        assert b"other-id" not in body
+
+    def test_unmatched_file_is_not_uploaded(self, tmp_path: Path, monkeypatch) -> None:
+        """`notes.txt` doesn't satisfy the include_patterns nor the
+        id_pattern; it must never reach the server."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f1"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        upload_bodies = [
+            r.content
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        ]
+        assert len(upload_bodies) == 1
+        assert b"notes.txt" not in upload_bodies[0]
+
+    def test_group_id_forwarded_to_create_item(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A `group_id` capture group should be passed through to the
+        item-creation payload so the upstream client (once patched) can
+        apply group-level access control."""
+        data = tmp_path / "data"
+        data.mkdir()
+        (data / "P042" / "7-cycle.mpr").parent.mkdir(parents=True)
+        (data / "P042" / "7-cycle.mpr").write_bytes(b"\x00" * 8)
+
+        config = BeholderConfig(
+            datalabs=[
+                {
+                    "name": "test",
+                    "url": "https://test.example.org",
+                    "api_key": "test-key",
+                }
+            ],
+            watched_paths=[
+                {
+                    "path": str(data),
+                    "name": "cells",
+                    "item_type": "cells",
+                    "include_patterns": ["*.mpr"],
+                    "id_patterns": [
+                        r"^(?P<group_id>P[0-9]+)/(?P<item_id>[0-9]+)-.*\.mpr$"
+                    ],
+                    "scan": {
+                        "hot_interval": 0,
+                        "warm_interval": 0,
+                        "cold_interval": 0,
+                    },
+                }
+            ],
+            sync={"metadata_interval": 0},
+            state_db=tmp_path / "state.db",
+        )
+
+        transport = MockTransport()
+        transport.add_response("GET", "/get-item-data/7", status_code=404, json_data={})
+        transport.add_response(
+            "POST",
+            "/new-sample/",
+            status_code=201,
+            json_data={"sample_list_entry": {"item_id": "7"}},
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "f1"},
+        )
+
+        # Spy: capture the kwargs the daemon hands to `create_item`.
+        from datalab_api import DatalabClient
+
+        captured: list[dict] = []
+
+        def fake_create(self, **kwargs):
+            captured.append(kwargs)
+            return {"item_id": kwargs.get("item_id"), "files": []}
+
+        monkeypatch.setattr(DatalabClient, "create_item", fake_create)
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        assert len(captured) == 1
+        assert captured[0]["item_id"] == "7"
+        assert captured[0]["item_type"] == "cells"
+        assert captured[0]["group_ids"] == "P042"
+
+    def test_failed_upload_leaves_entry_unsynced_for_retry(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Server 500 on upload → state row stays `new`, next tick retries."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                }
+            },
+        )
+        # Single registered response: 500. Both tick() upload attempts
+        # will hit it, no retry-state needed.
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=500,
+            json_data={"error": "boom"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        pending_after_first = daemon._state.get_pending_changes("cells")
+        assert any(
+            e.path == "42-cell-formation.mpr" and e.status != "synced"
+            for e in pending_after_first
+        )
+
+        # Force the attach interval to elapse again and retry.
+        daemon._last_attach_mono = time.monotonic() - 10
+        upload_count_before = sum(
+            1
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        )
+        daemon.tick()
+        upload_count_after = sum(
+            1
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        )
+        # A retry happened.
+        assert upload_count_after > upload_count_before
 
 
 class TestMultiDatalabRouting:
@@ -331,28 +586,3 @@ class TestMultiDatalabRouting:
             "https://north.example.org",
             "https://south.example.org",
         ]
-
-    def test_attach_runs_after_push_in_tick(
-        self, tmp_path: Path, tmp_tree: Path, monkeypatch
-    ) -> None:
-        """Attach hook must fire after metadata push, both inside the same tick window."""
-        from unittest.mock import MagicMock
-
-        helper = TestBeholderDaemon()
-        config = helper._make_config(tmp_path, tmp_tree)
-        transport = MockTransport()
-        daemon = helper._make_daemon(config, transport, monkeypatch)
-        daemon._last_push_mono = 0.0
-        daemon._last_poll_mono = float("inf")  # skip poll branch
-
-        order: list[str] = []
-        daemon._push_pending_changes = MagicMock(
-            side_effect=lambda: order.append("push")
-        )
-        daemon._attach_matched_files = MagicMock(
-            side_effect=lambda: order.append("attach")
-        )
-
-        daemon.tick()
-
-        assert order == ["push", "attach"]
