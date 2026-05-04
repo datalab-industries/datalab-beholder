@@ -1,0 +1,17 @@
+datalabs:
+- name: digibat
+  url: https://example.com
+  api_key: your-api-key-here
+log_level: debug
+sync:
+  metadata_interval: 1200
+watched_paths:
+- name: digibat
+  path: "."
+  datalab: digibat
+  item_type: cells
+  include_patterns:
+    - "*.mpr"
+  id_patterns:
+    # P-code project dir (3 or 4 digits) / item-id prefix (digits, then - or _) / *.mpr
+    - "^(?P<group_id>P[0-9]{3,}).*/.*(?P<item_id>\\d+)[-_].*\\.mpr$"
