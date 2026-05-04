@@ -1,13 +1,16 @@
 """Three-stage end-to-end smoke test against a real datalab instance.
 
-Drives `BeholderDaemon` against ``example/config.yaml`` (which points at
-``http://localhost:8080`` by default) and walks the file tree through
-three mutations, checking after each one that the items / attached files
-on the server reflect the local state. Designed to grow into a CI job
-backed by a throwaway datalab.
+Drives `BeholderDaemon` against ``config.yaml`` in this directory (which
+points at ``http://localhost:8080`` by default) and walks the file tree
+through three mutations, checking after each one that the items /
+attached files on the server reflect the local state.
+
+A mock-transport version of the same flow lives next door as
+``test_three_stage.py`` and runs in CI; this script is the live
+counterpart, intended for manual smoke testing against a real datalab.
 
 Run it:
-    DATALAB_API_KEY=... uv run python example/run_example.py
+    DATALAB_API_KEY=... uv run python tests/examples/three-stage/run_live.py
 
 Item ids are prefixed with ``beholder-test-`` so they're easy to spot
 (and easy to delete) on the target deployment. Re-running is idempotent

@@ -201,7 +201,6 @@ The 0.1.x version ships only the **direct-attach** mode described above. A secon
 Other things on the list:
 
 - **SSH and cloud-storage watched paths.** The config schema already discriminates on `kind` (`local` / `ssh` / `cloud`); only `local` is implemented today.
-- **CI integration of the 3-stage example** in `example/run_example.py` against a throwaway datalab instance.
 
 Issues and design discussion welcome — file them at [github.com/datalab-org/datalab-beholder/issues](https://github.com/datalab-org/datalab-beholder/issues).
 
