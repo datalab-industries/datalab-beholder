@@ -1,62 +1,44 @@
 """HTTP client for communicating with a datalab instance.
 
-Inherits from BaseDatalabClient to get auth, session management, and error
-handling. Adds daemon-specific methods for the planned /api/remote-files/*
-endpoints and exponential backoff for resilient daemon operation.
+Subclasses :class:`datalab_api.DatalabClient` to inherit auth, session
+management, version negotiation, and the standard CRUD surface
+(``get_item``, ``create_item``, ``upload_file``, ...). Adds only the
+small surface the beholder daemon needs: a non-raising connection
+probe, an "ensure item exists" route, an existing-file lookup so
+modified files replace rather than duplicate, and a non-raising
+attach wrapper so a single bad item can't take the loop down.
 
-Note: BaseDatalabClient.__init__ eagerly connects to the server (calls
-_detect_api_url, get_info, get_block_info). This is accepted for now;
-the base class will be refactored to make this optional.
+Note: ``DatalabClient.__init__`` eagerly handshakes with the server
+(``_detect_api_url``, ``get_info``, ``get_block_info``). That is
+accepted for now; tests monkeypatch those hooks via
+``_make_beholder_client``.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from datalab_api._base import BaseDatalabClient, DatalabAPIError
+from datalab_api import DatalabAPIError, DatalabClient
 
 log = logging.getLogger(__name__)
 
-INITIAL_BACKOFF = 1.0
-MAX_BACKOFF = 300.0  # 5 minutes
-BACKOFF_FACTOR = 2.0
 
+class BeholderClient(DatalabClient):
+    """Datalab client with daemon-friendly, non-raising helpers."""
 
-@dataclass
-class FileRequest:
-    """A server request for a specific file to be uploaded."""
-
-    request_id: str
-    path: str
-    priority: str = "normal"
-
-
-class BeholderClient(BaseDatalabClient):
-    """HTTP client for the beholder daemon's communication with datalab.
-
-    Inherits auth, session management, and error handling from
-    BaseDatalabClient. Adds daemon-specific API methods with exponential
-    backoff for resilient operation when the server is unreachable.
-    """
-
-    # Instance-level backoff state (shadowed from class attribute on first mutation)
-    _backoff: float = INITIAL_BACKOFF
     last_request_ok: bool = False
 
     def check_connection(self) -> tuple[bool, bool]:
-        """Check server reachability and authentication.
+        """Probe the server with a lightweight ``GET /info``.
 
-        Performs a lightweight GET to ``/info`` to test reachability.
-        Auth is considered configured when a real API key is present
-        (non-empty, non-placeholder).  A proper server-side auth check
-        will be added once the ``/api/remote-files/*`` endpoints exist.
+        Auth is reported as configured when a non-placeholder API key is
+        present in the request headers. Once datalab grows a proper
+        ``/whoami``-style endpoint, this can be tightened.
 
         Returns:
-            ``(reachable, authenticated)`` booleans.
+            ``(reachable, authenticated)``.
         """
         reachable = False
         authenticated = False
@@ -73,166 +55,98 @@ class BeholderClient(BaseDatalabClient):
         self.last_request_ok = reachable
         return reachable, authenticated
 
-    def get_info(self) -> dict[str, Any]:
-        info_url = f"{self.datalab_api_url}/info"
-        info_data = self._get(info_url)
-        self.info = info_data["data"]
-        return self.info
-
-    def get_block_info(self) -> list[dict[str, Any]]:
-        block_info_url = f"{self.datalab_api_url}/info/blocks"
-        block_info_data = self._get(block_info_url)
-        self.block_info = block_info_data["data"]
-        return self.block_info
-
-    def _url(self, path: str) -> str:
-        return f"{self.datalab_api_url}{path}"
-
-    def _reset_backoff(self) -> None:
-        self._backoff = INITIAL_BACKOFF
-
-    def _increase_backoff(self) -> float:
-        current = self._backoff
-        self._backoff = min(self._backoff * BACKOFF_FACTOR, MAX_BACKOFF)
-        return current
-
-    def _safe_request(
-        self,
-        method: str,
-        path: str,
-        expected_status: int = 200,
-        **kwargs: Any,
-    ) -> dict[str, Any] | None:
-        """Make an HTTP request with exponential backoff on failure.
-
-        Wraps the inherited _request method but returns None on failure
-        (after logging the error) rather than raising, so the daemon loop
-        can continue operating.
-        """
-        url = self._url(path)
+    def fetch_item(self, item_id: str) -> dict[str, Any] | None:
+        """Return the item's data dict, or ``None`` if it doesn't exist
+        (or any other error)."""
         try:
-            result = super()._request(method, url, expected_status, **kwargs)
-            self._reset_backoff()
-            self.last_request_ok = True
-            return result
+            return super().get_item(item_id=item_id, load_blocks=False)
         except DatalabAPIError as e:
-            wait = self._increase_backoff()
-            log.error(
-                "Request failed for %s %s: %s (backing off %.1fs)", method, url, e, wait
-            )
-            self.last_request_ok = False
+            log.debug("get_item(%s) failed: %s", item_id, e)
             return None
 
-    def push_metadata(
+    def ensure_item(
         self,
-        daemon_id: str,
-        entries: list[dict[str, Any]],
-        snapshot_type: str,
-    ) -> bool:
-        """Push file metadata to the server.
+        item_id: str,
+        item_type: str,
+        collection_id: str | None = None,
+        group_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Return the item's data dict; create it first if it doesn't exist.
 
-        Args:
-            daemon_id: Unique identifier for this daemon instance.
-            entries: List of file entry dicts to send.
-            snapshot_type: "full" or "diff".
-
-        Returns:
-            True if the server accepted the metadata.
+        ``collection_id`` is forwarded to ``create_item``, which links
+        (or creates) the matching collection. ``group_id`` is forwarded
+        as a single-element ``group_ids`` list and grants the named
+        group access control on the new item. Returns ``None`` if the
+        creation attempt fails.
         """
-        result = self._safe_request(
-            "POST",
-            "/api/remote-files/metadata",
-            json={
-                "source_type": "daemon",
-                "daemon_id": daemon_id,
-                "snapshot_type": snapshot_type,
-                "entries": entries,
-            },
+        item = self.fetch_item(item_id)
+        if item is not None:
+            return item
+
+        log.info(
+            "Creating item %s (type=%s, group=%s, collection=%s)",
+            item_id,
+            item_type,
+            group_id,
+            collection_id,
         )
-        return result is not None
-
-    def poll_file_requests(self, daemon_id: str) -> list[FileRequest]:
-        """Poll the server for pending file transfer requests.
-
-        Args:
-            daemon_id: Unique identifier for this daemon instance.
-
-        Returns:
-            List of FileRequest objects, empty on failure.
-        """
-        result = self._safe_request(
-            "GET",
-            "/api/remote-files/pending",
-            params={"daemon_id": daemon_id},
-        )
-        if result is None:
-            return []
-
-        return [
-            FileRequest(
-                request_id=r["request_id"],
-                path=r["path"],
-                priority=r.get("priority", "normal"),
+        try:
+            created = super().create_item(
+                item_id=item_id,
+                item_type=item_type,
+                collection_id=collection_id,
+                group_ids=group_id,
             )
-            for r in result.get("requests", [])
-        ]
+        except DatalabAPIError as e:
+            log.error("Failed to create item %s: %s", item_id, e)
+            return None
 
-    def upload_file(
+        # `create_item` returns a `sample_list_entry` rather than full
+        # item data, but a freshly-created item has no attachments by
+        # definition, so `find_existing_file_id` will correctly return
+        # None against either shape.
+        return created if isinstance(created, dict) else {"files": []}
+
+    def find_existing_file_id(self, item: dict[str, Any], filename: str) -> str | None:
+        """Look up the immutable file id of an attachment by basename.
+
+        ``item`` is the dict returned by :meth:`fetch_item` /
+        :meth:`ensure_item`. Returns the first match, or ``None`` if
+        nothing on the item shares that filename.
+        """
+        for f in item.get("files", []) or []:
+            if f.get("name") == filename:
+                file_id = f.get("immutable_id")
+                if file_id:
+                    return str(file_id)
+        return None
+
+    def attach_file(
         self,
-        request_id: str,
+        item_id: str,
         file_path: Path,
-        metadata: dict[str, Any],
-    ) -> bool:
-        """Upload a file to the server in response to a file request.
+        replace_file_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Upload ``file_path`` and attach it to ``item_id``.
 
-        Args:
-            request_id: The server's request ID for this file.
-            file_path: Local path to the file to upload.
-            metadata: File metadata dict (size, modified, etc.).
-
-        Returns:
-            True if the upload succeeded.
+        Pass ``replace_file_id`` to replace a previously-attached file
+        in place (preserves the file's immutable id and any blocks
+        pointing at it). Errors are logged and swallowed so the daemon
+        loop survives a single bad item or transient hiccup.
         """
         try:
-            with open(file_path, "rb") as f:
-                result = self._safe_request(
-                    "POST",
-                    "/api/remote-files/upload",
-                    files={"file": (file_path.name, f)},
-                    data={
-                        "request_id": request_id,
-                        "metadata": str(metadata),
-                    },
-                )
-            return result is not None
-        except OSError as e:
-            log.error("Cannot read file %s for upload: %s", file_path, e)
-            return False
-
-    def heartbeat(self, daemon_id: str, status: dict[str, Any]) -> bool:
-        """Send a heartbeat to the server.
-
-        Args:
-            daemon_id: Unique identifier for this daemon instance.
-            status: Status information dict.
-
-        Returns:
-            True if the heartbeat was accepted.
-        """
-        result = self._safe_request(
-            "POST",
-            "/api/remote-files/heartbeat",
-            json={"daemon_id": daemon_id, "status": status},
-        )
-        return result is not None
-
-    @property
-    def current_backoff(self) -> float:
-        """The current backoff delay in seconds."""
-        return self._backoff
-
-    def wait_backoff(self) -> None:
-        """Sleep for the current backoff duration. Used between retries."""
-        if self._backoff > INITIAL_BACKOFF:
-            log.info("Backing off for %.1f seconds", self._backoff)
-            time.sleep(self._backoff)
+            result = super().upload_file(
+                item_id=item_id,
+                file_path=file_path,
+                replace_file_id=replace_file_id,
+            )
+            self.last_request_ok = True
+            return result
+        except FileNotFoundError:
+            log.warning("File vanished before upload: %s", file_path)
+            self.last_request_ok = False
+            return None
+        except DatalabAPIError as e:
+            log.error("Failed to attach %s to item %s: %s", file_path, item_id, e)
+            self.last_request_ok = False
+            return None
