@@ -79,6 +79,15 @@ def scan(
 
     if config_path:
         config = load_config(config_path)
+        config.log_level = "DEBUG"
+
+        logging.basicConfig(
+            level=config.log_level.upper(),
+            format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            handlers=[
+                logging.StreamHandler(sys.stderr),
+            ],
+        )
 
     if config:
         from datalab_beholder.config import LocalWatchedPath
