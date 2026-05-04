@@ -1,6 +1,6 @@
 [project]
 name = "datalab-beholder"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Filesystem watcher daemon for datalab instances"
 readme = "README.md"
 license = { text = "MIT" }
@@ -16,11 +16,12 @@ dependencies = [
 datalab-beholder = "datalab_beholder.cli:main"
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools >= 77.0.3", "setuptools_scm>=8.1,<10.0", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/datalab_beholder"]
+[tool.setuptools_scm]
+fallback_version = "0.1.0"
+version_scheme = "post-release"
 
 [dependency-groups]
 dev = [
