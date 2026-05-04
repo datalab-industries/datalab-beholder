@@ -19,7 +19,7 @@ from datalab_beholder import __version__
 def main(ctx: click.Context) -> None:
     """Filesystem watcher daemon for datalab instances."""
     if ctx.invoked_subcommand is None:
-        ctx.invoke(gui)
+        ctx.invoke(start)
 
 
 @main.command()
