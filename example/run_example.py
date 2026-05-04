@@ -173,11 +173,11 @@ def main() -> int:
             stage1_initial,
             [
                 Expectation(
-                    "beholder-test-001",
+                    "PROJ-A-beholder-test-001",
                     {"beholder-test-001-cycle1.mpr"},
                 ),
                 Expectation(
-                    "beholder-test-002",
+                    "PROJ-A-beholder-test-002",
                     {"beholder-test-002-formation.mpr"},
                 ),
             ],
@@ -187,15 +187,15 @@ def main() -> int:
             stage2_modify_and_add,
             [
                 Expectation(
-                    "beholder-test-001",
+                    "PROJ-A-beholder-test-001",
                     {"beholder-test-001-cycle1.mpr"},
                 ),
                 Expectation(
-                    "beholder-test-002",
+                    "PROJ-A-beholder-test-002",
                     {"beholder-test-002-formation.mpr"},
                 ),
                 Expectation(
-                    "beholder-test-003",
+                    "PROJ-A-beholder-test-003",
                     {"beholder-test-003-rate.mpr"},
                 ),
             ],
@@ -205,7 +205,7 @@ def main() -> int:
             stage3_second_file_for_existing_item,
             [
                 Expectation(
-                    "beholder-test-001",
+                    "PROJ-A-beholder-test-001",
                     {
                         "beholder-test-001-cycle1.mpr",
                         "beholder-test-001-cycle2.mpr",
