@@ -41,7 +41,6 @@ a = Analysis(
         "numpy",
         "bokeh",
         "PIL",
-        "rich",
         "tornado",
     ],
     noarchive=False,
