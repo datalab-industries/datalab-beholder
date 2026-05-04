@@ -1,0 +1,36 @@
+# Example configuration for the 3-stage beholder smoke test.
+#
+# Drives `run_example.py` against a datalab running at localhost:8080.
+# `instrument-pc/` is the watched tree — the script writes/mutates
+# files there between stages. State and logs land alongside this file.
+
+datalabs:
+  - name: local
+    url: http://localhost:8080
+    # Set DATALAB_API_KEY in the environment, or replace the placeholder
+    # below with a real key. Plain-text keys in YAML are fine for local
+    # dev but don't commit them.
+    api_key: your-api-key-here
+
+watched_paths:
+  - kind: local
+    path: ./instrument-pc
+    name: example-instrument
+    datalab: local
+    item_type: cells
+    include_patterns:
+      - "*.mpr"
+    id_patterns:
+      # Group/item ids carry a `beholder-test-` prefix so they're
+      # easy to spot in datalab and won't collide with real data.
+      - "^(?P<group_id>PROJ-[A-Z]+)/(?P<item_id>beholder-test-[0-9]+)-.*\\.mpr$"
+    scan:
+      hot_interval: 0
+      warm_interval: 0
+      cold_interval: 0
+
+sync:
+  metadata_interval: 0  # attach on every tick
+
+log_level: info
+state_db: ./state.db
