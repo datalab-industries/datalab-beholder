@@ -93,8 +93,8 @@ wheels = [
 
 [[package]]
 name = "datalab-api"
-version = "0.4.0.post3+g63dd9e9"
-source = { git = "https://github.com/datalab-org/datalab-api#63dd9e9003e69367280f04997c48b6bf2d19246d" }
+version = "0.4.0.post4+g3c1521a"
+source = { git = "https://github.com/datalab-org/datalab-api#3c1521a9604a60aad89fcd03dcc173a0a47e14ff" }
 dependencies = [
     { name = "bokeh", marker = "sys_platform != 'emscripten'" },
     { name = "httpx" },
