@@ -134,7 +134,9 @@ class BeholderDaemon:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(sig, self._handle_signal)
 
-        self._last_attach_mono = time.monotonic()
+        self._last_attach_mono = (
+            time.monotonic() - self._config.sync.metadata_interval
+        )  # so attach runs on the first tick
         self._running = True
 
     def tick(self) -> None:
