@@ -10,8 +10,11 @@ watched_paths:
   path: "."
   datalab: digibat
   item_type: cells
+  item_id_template: "{group_id}/{item_id}"
   include_patterns:
     - "*.mpr"
   id_patterns:
-    # P-code project dir (3 or 4 digits) / item-id prefix (digits, then - or _) / *.mpr
-    - "^(?P<group_id>P[0-9]{3,}).*/.*(?P<item_id>\\d+)[-_].*\\.mpr$"
+    # P-code project dir, then any depth, then a basename whose *last* digit run
+    # (before the .mpr extension) is the item id. `\D*\.mpr$` forces the regex
+    # to backtrack onto the last digit group rather than the first.
+    - "^(?P<group_id>P[0-9]{3,})/.*?(?P<item_id>\\d+)\\D*\\.mpr$"
