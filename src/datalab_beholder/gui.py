@@ -494,7 +494,7 @@ class BeholderGUI(tk.Tk):
                 self._sync_ind_label,
                 "Error",
             )
-        elif self._daemon.last_push_time is not None:
+        elif self._daemon.last_attach_time is not None:
             self._set_indicator(
                 self._sync_ind,
                 GREEN,
@@ -513,8 +513,8 @@ class BeholderGUI(tk.Tk):
         if self._daemon.last_scan_time is not None:
             dt = datetime.fromtimestamp(self._daemon.last_scan_time)
             self._last_scan_val.configure(text=dt.strftime("%Y-%m-%d %H:%M:%S"))
-        if self._daemon.last_push_time is not None:
-            dt = datetime.fromtimestamp(self._daemon.last_push_time)
+        if self._daemon.last_attach_time is not None:
+            dt = datetime.fromtimestamp(self._daemon.last_attach_time)
             self._last_push_val.configure(text=dt.strftime("%Y-%m-%d %H:%M:%S"))
         self._pending_val.configure(text=f"{self._daemon.pending_count} files")
 
@@ -668,35 +668,6 @@ class SettingsDialog(tk.Toplevel):
             bg=BG,
             fg=FG_DIM,
         ).grid(row=0, column=2, sticky="w")
-
-        tk.Label(
-            intervals_frame,
-            text="File request poll:",
-            font=FONT_SM,
-            bg=BG,
-            fg=FG,
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
-
-        self._poll_var = tk.StringVar(
-            value=str(self._config.sync.file_request_poll),
-        )
-        tk.Entry(
-            intervals_frame,
-            textvariable=self._poll_var,
-            width=8,
-            bg=BG_LIGHT,
-            fg=FG,
-            insertbackground=FG,
-            relief="flat",
-        ).grid(row=1, column=1, padx=4, pady=(4, 0))
-
-        tk.Label(
-            intervals_frame,
-            text="s",
-            font=FONT_SM,
-            bg=BG,
-            fg=FG_DIM,
-        ).grid(row=1, column=2, sticky="w", pady=(4, 0))
 
         # -- Buttons ----------------------------------------------------------
         btn_frame = tk.Frame(self, bg=BG)
@@ -903,7 +874,6 @@ class SettingsDialog(tk.Toplevel):
     def _save(self) -> None:
         try:
             metadata_interval = int(self._metadata_var.get())
-            poll_interval = int(self._poll_var.get())
         except ValueError:
             messagebox.showerror(
                 "Validation",
@@ -977,7 +947,6 @@ class SettingsDialog(tk.Toplevel):
             "watched_paths": watched_paths,
             "sync": {
                 "metadata_interval": metadata_interval,
-                "file_request_poll": poll_interval,
             },
             "log_level": self._config.log_level,
         }
