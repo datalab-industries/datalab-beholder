@@ -79,6 +79,66 @@ class TestBeholderClient:
         assert result is None
         assert client.last_request_ok is False
 
+    def test_per_client_api_keys_dont_leak_across_instances(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """Regression: ``BaseDatalabClient`` declares ``_headers = {}`` at
+        class level, so without ``BeholderClient.__init__`` shadowing it
+        per-instance, the second client's API key would clobber the
+        first one's. Construct two clients with different keys and
+        verify each sends its own."""
+        import httpx
+
+        from tests.conftest import MockTransport
+
+        from datalab_api._base import BaseDatalabClient
+        from datalab_beholder.client import BeholderClient
+
+        monkeypatch.setattr(BaseDatalabClient, "_detect_api_url", lambda self: None)
+
+        def mock_get_info(self):
+            self.info = {
+                "attributes": {
+                    "available_api_versions": ["0.1.0"],
+                    "server_version": "0.1.0",
+                }
+            }
+            return self.info
+
+        monkeypatch.setattr(BeholderClient, "get_info", mock_get_info)
+        monkeypatch.setattr(
+            BeholderClient,
+            "get_block_info",
+            lambda self: setattr(self, "block_info", []) or [],  # type: ignore
+        )
+
+        # Set the key, build client A, then change the key and build B —
+        # this is exactly what `_build_clients` does for multi-datalab.
+        monkeypatch.setenv("DATALAB_API_KEY", "key-A")
+        client_a = BeholderClient(datalab_api_url="https://a.example.org")
+        monkeypatch.setenv("DATALAB_API_KEY", "key-B")
+        client_b = BeholderClient(datalab_api_url="https://b.example.org")
+
+        transport_a = MockTransport()
+        transport_a.add_response("POST", "/upload-file/", status_code=201, json_data={})
+        transport_b = MockTransport()
+        transport_b.add_response("POST", "/upload-file/", status_code=201, json_data={})
+
+        client_a._session = httpx.Client(
+            transport=transport_a, headers=client_a.headers, timeout=client_a.timeout
+        )
+        client_b._session = httpx.Client(
+            transport=transport_b, headers=client_b.headers, timeout=client_b.timeout
+        )
+
+        f = tmp_path / "x.csv"
+        f.write_text("data")
+        client_a.attach_file(item_id="i", file_path=f)
+        client_b.attach_file(item_id="i", file_path=f)
+
+        assert transport_a.requests[0].headers["DATALAB-API-KEY"] == "key-A"
+        assert transport_b.requests[0].headers["DATALAB-API-KEY"] == "key-B"
+
     def test_auth_header_sent(
         self, mock_transport, monkeypatch, tmp_path: Path
     ) -> None:
