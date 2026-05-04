@@ -51,8 +51,7 @@ watched_paths:
     #   hot_window: 86400       # "recent" cutoff for hot scan
 
 sync:
-  metadata_interval: 1200  # seconds (20 minutes)
-  file_request_poll: 60    # seconds (1 minute)
+  metadata_interval: 1200  # seconds (20 minutes) — attach cadence
 
 log_level: "info"
 # state_db: "state.db"  # defaults to alongside the package/executable
@@ -182,7 +181,10 @@ class LocalWatchedPath(WatchedPathBase):
     @field_validator("path")
     @classmethod
     def expand_path(cls, v: Path) -> Path:
-        return Path(os.path.expanduser(v)).resolve()
+        # Only handle ``~`` here — ``load_config`` resolves any remaining
+        # relative paths against the YAML file's directory so a relative
+        # path in the config doesn't depend on the shell's CWD.
+        return Path(os.path.expanduser(v))
 
     def hot_scan(self, state: StateStore) -> DiffResult:  # type: ignore[override]
         from time import time as _now
@@ -306,7 +308,7 @@ class CloudWatchedPath(WatchedPathBase):
     @field_validator("path")
     @classmethod
     def expand_path(cls, v: Path) -> Path:
-        return Path(os.path.expanduser(v)).resolve()
+        return Path(os.path.expanduser(v))
 
     def _not_implemented(self) -> None:
         raise NotImplementedError(
@@ -337,7 +339,6 @@ class SyncConfig(BaseModel):
     """Timing configuration for sync loops."""
 
     metadata_interval: int = 1200
-    file_request_poll: int = 60
 
 
 class DatalabConfig(BaseModel):
@@ -395,7 +396,9 @@ class BeholderConfig(BaseModel):
     @field_validator("state_db")
     @classmethod
     def expand_state_db(cls, v: Path) -> Path:
-        return Path(os.path.expanduser(v)).resolve()
+        # See LocalWatchedPath.expand_path — resolution happens in
+        # ``load_config`` so relative paths track the YAML location.
+        return Path(os.path.expanduser(v))
 
     @model_validator(mode="after")
     def validate_datalab_refs(self) -> BeholderConfig:
@@ -456,7 +459,22 @@ def load_config(path: Path | None = None) -> BeholderConfig:
     if raw is None:
         raise ValueError(f"Config file is empty: {path}")
 
-    return BeholderConfig(**raw)
+    config = BeholderConfig(**raw)
+
+    # Resolve relative `path` fields against the config file's directory
+    # so a YAML written with `./data` works regardless of the shell's CWD.
+    config_dir = path.parent
+    for wp in config.watched_paths:
+        wp_path = getattr(wp, "path", None)
+        if isinstance(wp_path, Path) and not wp_path.is_absolute():
+            wp.path = (config_dir / wp_path).resolve()
+        elif isinstance(wp_path, Path):
+            wp.path = wp_path.resolve()
+
+    if not config.state_db.is_absolute():
+        config.state_db = (config_dir / config.state_db).resolve()
+
+    return config
 
 
 def write_config_template(path: Path | None = None) -> Path:
