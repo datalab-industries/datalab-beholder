@@ -18,6 +18,8 @@ watched_paths:
     name: example-instrument
     datalab: local
     item_type: cells
+    item_id_template: "{group_id}-{item_id}"
+    collection_id_template: "{group_id}"
     include_patterns:
       - "*.mpr"
     id_patterns:
