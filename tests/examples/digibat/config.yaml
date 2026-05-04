@@ -14,7 +14,6 @@ watched_paths:
   include_patterns:
     - "*.mpr"
   id_patterns:
-    # P-code project dir, then any depth, then a basename whose *last* digit run
-    # (before the .mpr extension) is the item id. `\D*\.mpr$` forces the regex
-    # to backtrack onto the last digit group rather than the first.
-    - "^(?P<group_id>P[0-9]{3,})/.*?(?P<item_id>\\d+)\\D*\\.mpr$"
+    # P-code project dir, anything, then a digit run sandwiched between two
+    # separators (`/`, `_`, `-`). Greedy `.*` lets the last sandwich win.
+    - "^(?P<group_id>P[0-9]+).*[/_-](?P<item_id>[0-9]+)[_-]"
