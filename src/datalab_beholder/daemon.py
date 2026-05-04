@@ -309,12 +309,26 @@ class BeholderDaemon:
             synced: list[str] = []
             for entry in attachable:
                 file_path = wp.path / entry.path
-                item_id = entry.ids["item_id"]
+                item_id = None
+                collection_id = None
+
+                if wp.item_id_template is not None:
+                    item_id = wp.item_id_template.format(**entry.ids)
+
+                if wp.collection_id_template is not None:
+                    collection_id = wp.collection_id_template.format(**entry.ids)
+                if item_id:
+                    entry.ids["item_id"] = item_id
+                else:
+                    item_id = entry.ids["item_id"]
+
+                if collection_id:
+                    entry.ids["collection_id"] = collection_id
 
                 if item_id not in item_cache:
                     if wp.item_type:
                         item_cache[item_id] = client.ensure_item(
-                            item_id=item_id,
+                            item_id=entry.ids["item_id"],
                             item_type=wp.item_type,
                             collection_id=entry.ids.get("collection_id"),
                             group_id=entry.ids.get("group_id"),
@@ -322,7 +336,7 @@ class BeholderDaemon:
                     else:
                         # No item_type configured → don't create, only
                         # attach if the item already exists.
-                        item_cache[item_id] = client.fetch_item(item_id)
+                        item_cache[item_id] = client.fetch_item(entry.ids["item_id"])
 
                 item = item_cache[item_id]
                 if item is None:

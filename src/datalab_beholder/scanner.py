@@ -194,8 +194,8 @@ def scan_directory(
                     ids = _match_id_patterns(rel_path, compiled_id_patterns)
                     if ids is None:
                         log.debug(
-                            "File %s does not match ID patterns %s, skipping",
-                            entry.path,
+                            "%s does not match ID patterns, skipping",
+                            rel_path,
                             id_patterns,
                         )
                         continue

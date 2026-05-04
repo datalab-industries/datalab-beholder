@@ -139,6 +139,26 @@ class WatchedPathBase(BaseModel):
             "startup and used to populate metadata fields when posting to the datalab API."
         ),
     )
+
+    item_id_template: str | None = Field(
+        None,
+        description=(
+            "Optional template string to construct an item_id from the capture groups in "
+            "id_patterns. Uses Python's str.format syntax; capture group names are available "
+            "as variables. If unset, the raw item_id capture group value is used as the item_id."
+        ),
+        examples=["{item_id}", "{group_id}-{item_id}"],
+    )
+
+    collection_id_template: str | None = Field(
+        None,
+        description=(
+            "Optional template string to construct a collection_id from the capture groups in "
+            "id_patterns. Uses Python's str.format syntax; capture group names are available "
+            "as variables. If unset, no collection_id is set on the datalab item."
+        ),
+        examples=["{collection_id}", "group-{group_id}"],
+    )
     item_type: str | None = Field(
         None, description="Optional item type to set when posting to the datalab API"
     )
