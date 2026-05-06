@@ -139,6 +139,54 @@ class TestBeholderClient:
         assert transport_a.requests[0].headers["DATALAB-API-KEY"] == "key-A"
         assert transport_b.requests[0].headers["DATALAB-API-KEY"] == "key-B"
 
+    def test_find_existing_file_id_matches_secured_name_via_original(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        """Regression: server stores ``name = secure_filename(...)`` which
+        replaces spaces with underscores, while the on-disk basename keeps
+        them. The unmangled value lives in ``original_name`` — match
+        against that first so files with spaces don't duplicate on every
+        attach pass."""
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        item = {
+            "files": [
+                {
+                    "name": "P036-CEL-017-PACC_1_Na-ion_half_cell_100_cycles.ndax",
+                    "original_name": "P036-CEL-017-PACC_1_Na-ion half cell_100 cycles.ndax",
+                    "immutable_id": "abc123",
+                },
+            ],
+        }
+        match = client.find_existing_file_id(
+            item, "P036-CEL-017-PACC_1_Na-ion half cell_100 cycles.ndax"
+        )
+        assert match == "abc123"
+
+    def test_find_existing_file_id_case_insensitive(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        """Windows filesystems are case-preserving but case-insensitive,
+        so the same file can surface as ``Foo.mpr`` or ``foo.mpr``
+        across runs. Match should ignore case."""
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        item = {"files": [{"name": "Foo.MPR", "immutable_id": "id-1"}]}
+        assert client.find_existing_file_id(item, "foo.mpr") == "id-1"
+
+    def test_find_existing_file_id_no_match_returns_none(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        item = {
+            "files": [
+                {
+                    "name": "other.mpr",
+                    "original_name": "other.mpr",
+                    "immutable_id": "id-1",
+                },
+            ],
+        }
+        assert client.find_existing_file_id(item, "wanted.mpr") is None
+
     def test_auth_header_sent(
         self, mock_transport, monkeypatch, tmp_path: Path
     ) -> None:
