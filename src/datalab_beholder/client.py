@@ -113,12 +113,25 @@ class BeholderClient(DatalabClient):
         ``item`` is the dict returned by :meth:`fetch_item` /
         :meth:`ensure_item`. Returns the first match, or ``None`` if
         nothing on the item shares that filename.
+
+        Comparison prefers ``original_name`` (the unaltered filename the
+        client sent) and falls back to ``name``. The server stores
+        ``name = secure_filename(original_name)``, which mangles spaces
+        and other characters into underscores — so a basename like
+        ``"foo bar.mpr"`` on disk would never compare equal to the
+        ``name`` field, causing a duplicate upload on every tick. Match
+        is also case-insensitive to cope with Windows filesystems being
+        case-preserving but case-insensitive.
         """
+        target = filename.casefold()
         for f in item.get("files", []) or []:
-            if f.get("name") == filename:
-                file_id = f.get("immutable_id")
-                if file_id:
-                    return str(file_id)
+            for key in ("original_name", "name"):
+                candidate = f.get(key)
+                if candidate and candidate.casefold() == target:
+                    file_id = f.get("immutable_id")
+                    if file_id:
+                        return str(file_id)
+                    break
         return None
 
     def attach_file(
