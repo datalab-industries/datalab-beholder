@@ -120,12 +120,22 @@ class TestStateStore:
         assert all(e.status == "new" for e in pending)
         store.close()
 
-    def test_log_sync(self, tmp_path: Path) -> None:
+    def test_get_last_sync_derives_from_per_path_table(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        """``get_last_sync`` reads ``MAX(last_synced)`` straight from the
+        per-path file table, so it reflects whatever ``mark_synced``
+        most recently wrote — no separate sync log."""
         store = StateStore(tmp_path / "test.db")
-        # log_sync uses the shared sync_log table; no registration needed.
-        store.log_sync("test-path", "full", 10, True)
-        assert store.get_last_sync("test-path") is not None
-        assert store.get_last_sync("nonexistent") is None
+        store.register_watched_path("test-path")
+
+        assert store.get_last_sync("test-path") is None
+
+        store.update_from_scan(scan_directory(tmp_tree, name="test-path"))
+        store.mark_synced("test-path", ["file1.csv"])
+
+        ts = store.get_last_sync("test-path")
+        assert ts is not None and ts > 0
         store.close()
 
     def test_context_manager(self, tmp_path: Path) -> None:

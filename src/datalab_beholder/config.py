@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 # interpret when posting to the datalab API.
 ALLOWED_ID_GROUPS: frozenset[str] = frozenset({"group_id", "item_id", "collection_id"})
 
+# Latest on-disk config schema version. Configs without an explicit
+# `version` field are treated as v1 for backwards compatibility with
+# existing deployments.
+LATEST_CONFIG_VERSION = 1
+
 if getattr(sys, "frozen", False):
     # PyInstaller bundle: config lives next to the executable
     DEFAULT_CONFIG_DIR = Path(sys.executable).resolve().parent
@@ -30,6 +35,8 @@ DEFAULT_STATE_DB_PATH = DEFAULT_CONFIG_DIR / "state.db"
 
 CONFIG_TEMPLATE = """\
 # datalab-beholder configuration
+version: 1
+
 datalabs:
   - name: "example"
     url: "https://datalab.example.org"
@@ -406,6 +413,14 @@ class DatalabConfig(BaseModel):
 class BeholderConfig(BaseModel):
     """Top-level configuration for the beholder daemon."""
 
+    version: int = Field(
+        LATEST_CONFIG_VERSION,
+        description=(
+            "On-disk config schema version. Absent in older configs (treated "
+            "as v1). `load_config` migrates older versions forward before "
+            "validation."
+        ),
+    )
     datalabs: list[DatalabConfig] = Field(
         ...,
         description="List of datalab instances to post to; multiple versions of the same datalab can be included with different names for different paths or users",
@@ -470,6 +485,43 @@ class BeholderConfig(BaseModel):
         return self
 
 
+def _migrate_raw_config(raw: dict, *, source: str) -> dict:
+    """Walk the migrator chain from ``raw['version']`` up to the latest.
+
+    Mutates and returns ``raw``. A missing ``version`` field is treated as
+    v1 — older configs predate the field.
+    """
+    from datalab_beholder.config_migrations import MIGRATORS
+
+    if not isinstance(raw, dict):
+        raise ValueError(f"Config root must be a mapping: {source}")
+
+    raw_version = raw.get("version", 1)
+    if not isinstance(raw_version, int):
+        raise ValueError(
+            f"Config `version` must be an integer, got {raw_version!r}: {source}"
+        )
+
+    if raw_version > LATEST_CONFIG_VERSION:
+        raise ValueError(
+            f"Config {source} is version {raw_version}, but this beholder "
+            f"only understands up to v{LATEST_CONFIG_VERSION}. Upgrade the "
+            "daemon."
+        )
+
+    while raw_version < LATEST_CONFIG_VERSION:
+        migrator = MIGRATORS.get(raw_version)
+        if migrator is None:
+            raise ValueError(
+                f"No migrator registered for config v{raw_version} → "
+                f"v{raw_version + 1} (source: {source})"
+            )
+        raw = migrator(raw)
+        raw_version = raw.get("version", raw_version + 1)
+
+    return raw
+
+
 def load_config(path: Path | None = None) -> BeholderConfig:
     """Load and validate configuration from a YAML file.
 
@@ -498,6 +550,8 @@ def load_config(path: Path | None = None) -> BeholderConfig:
 
     if raw is None:
         raise ValueError(f"Config file is empty: {path}")
+
+    raw = _migrate_raw_config(raw, source=str(path))
 
     config = BeholderConfig(**raw)
 
