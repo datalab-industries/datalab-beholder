@@ -2,8 +2,7 @@
 
 Each watched path gets its own `files__<sanitized_name>` table plus a row
 in the shared `watched_paths` registry that tracks the last hot/warm/cold
-scan timestamps. The shared `sync_log` table records push attempts across
-all paths.
+scan timestamps.
 
 The split keeps queries cheap (smaller indexes, no cross-path WHERE
 clauses), lets a path's state be wiped independently, and makes room for
@@ -34,14 +33,6 @@ CREATE TABLE IF NOT EXISTS watched_paths (
     last_max_dir_mtime REAL
 );
 
-CREATE TABLE IF NOT EXISTS sync_log (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    watched_path_name TEXT,
-    timestamp REAL,
-    snapshot_type TEXT,
-    entries_sent INTEGER,
-    success INTEGER
-);
 """
 
 # SQLite doesn't bind table names, so we interpolate after sanitising. The
@@ -160,14 +151,23 @@ class StateStore:
     # ------------------------------------------------------------------
 
     def _wipe_legacy_files_table(self) -> None:
-        """Drop the old single `files` table from pre-per-path schema, if
-        it exists. The next scan on each watched path will re-seed."""
-        cursor = self._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='files'"
-        )
-        if cursor.fetchone() is not None:
-            self._conn.execute("DROP TABLE files")
-            self._conn.commit()
+        """Drop legacy tables that no longer back any code path:
+
+        * ``files`` — the pre-per-path single-table schema.
+        * ``sync_log`` — never actually written to; ``get_last_sync`` now
+          derives from ``MAX(last_synced)`` on the per-path file tables.
+
+        The next scan on each watched path will re-seed any state that
+        the per-path tables need.
+        """
+        for name in ("files", "sync_log"):
+            cursor = self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            )
+            if cursor.fetchone() is not None:
+                self._conn.execute(f"DROP TABLE {name}")
+        self._conn.commit()
 
     def register_watched_path(self, name: str) -> None:
         """Idempotently register a watched path, creating its file table.
@@ -669,30 +669,19 @@ class StateStore:
         self._conn.commit()
 
     # ------------------------------------------------------------------
-    # Sync log (shared across paths)
+    # Sync history
     # ------------------------------------------------------------------
 
-    def log_sync(
-        self,
-        watched_path_name: str,
-        snapshot_type: str,
-        entries_sent: int,
-        success: bool,
-    ) -> None:
-        self._conn.execute(
-            "INSERT INTO sync_log "
-            "(watched_path_name, timestamp, snapshot_type, entries_sent, success) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (watched_path_name, time(), snapshot_type, entries_sent, int(success)),
-        )
-        self._conn.commit()
-
     def get_last_sync(self, watched_path_name: str) -> float | None:
+        """Return the most recent ``last_synced`` timestamp recorded for
+        any file under this watched path, or None if nothing has been
+        synced yet. Reads directly from the per-path file table —
+        ``mark_synced`` is the only writer, so this is always
+        up-to-date."""
+        table = self._table_for(watched_path_name)
         cursor = self._conn.execute(
-            "SELECT timestamp FROM sync_log "
-            "WHERE watched_path_name = ? AND success = 1 "
-            "ORDER BY timestamp DESC LIMIT 1",
-            (watched_path_name,),
+            f"SELECT MAX(last_synced) AS ts FROM files__{table} "
+            "WHERE last_synced IS NOT NULL"
         )
         row = cursor.fetchone()
-        return row["timestamp"] if row else None
+        return row["ts"] if row and row["ts"] is not None else None
