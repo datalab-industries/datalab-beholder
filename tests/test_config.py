@@ -9,10 +9,13 @@ from pydantic import ValidationError
 
 from datalab_beholder.config import (
     ALLOWED_ID_GROUPS,
+    LATEST_CONFIG_VERSION,
     BeholderConfig,
     CloudWatchedPath,
     LocalWatchedPath,
     SSHWatchedPath,
+    _migrate_raw_config,
+    load_config,
 )
 
 
@@ -382,3 +385,68 @@ class TestScanCadence:
         assert wp.scan.hot_interval == 5
         assert wp.scan.warm_interval == 30
         assert wp.scan.hot_window == 600
+
+
+class TestConfigVersioning:
+    def test_default_version_is_latest(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("a")],
+            watched_paths=[_wp("wp1", tmp_path, datalab="a")],
+            state_db=tmp_path / "s.db",
+        )
+        assert cfg.version == LATEST_CONFIG_VERSION
+
+    def test_missing_version_treated_as_v1(self) -> None:
+        raw: dict = {"datalabs": [], "watched_paths": []}
+        out = _migrate_raw_config(raw, source="<test>")
+        # No migrators registered yet (v1 == latest), so dict passes through.
+        assert out is raw
+
+    def test_explicit_current_version_passes_through(self) -> None:
+        raw = {"version": 1, "datalabs": [], "watched_paths": []}
+        out = _migrate_raw_config(raw, source="<test>")
+        assert out["version"] == 1
+
+    def test_future_version_rejected(self) -> None:
+        raw = {"version": LATEST_CONFIG_VERSION + 1}
+        with pytest.raises(ValueError, match="Upgrade the daemon"):
+            _migrate_raw_config(raw, source="<test>")
+
+    def test_non_integer_version_rejected(self) -> None:
+        raw = {"version": "1"}
+        with pytest.raises(ValueError, match="must be an integer"):
+            _migrate_raw_config(raw, source="<test>")
+
+    def test_load_config_round_trips_version_field(self, tmp_path: Path) -> None:
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(
+            f"version: {LATEST_CONFIG_VERSION}\n"
+            "datalabs:\n"
+            "  - name: a\n"
+            "    url: https://a.example.org\n"
+            "    api_key: k\n"
+            "watched_paths:\n"
+            f"  - path: {tmp_path}\n"
+            "    name: wp1\n"
+            "    datalab: a\n"
+            f"state_db: {tmp_path / 's.db'}\n"
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.version == LATEST_CONFIG_VERSION
+
+    def test_load_config_without_version_field(self, tmp_path: Path) -> None:
+        """Existing v1 configs in the wild have no `version` field."""
+        cfg_path = tmp_path / "config.yaml"
+        cfg_path.write_text(
+            "datalabs:\n"
+            "  - name: a\n"
+            "    url: https://a.example.org\n"
+            "    api_key: k\n"
+            "watched_paths:\n"
+            f"  - path: {tmp_path}\n"
+            "    name: wp1\n"
+            "    datalab: a\n"
+            f"state_db: {tmp_path / 's.db'}\n"
+        )
+        cfg = load_config(cfg_path)
+        assert cfg.version == LATEST_CONFIG_VERSION
