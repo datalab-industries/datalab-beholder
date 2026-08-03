@@ -729,3 +729,101 @@ class TestMultiDatalabRouting:
             "https://north.example.org",
             "https://south.example.org",
         ]
+
+    def test_clients_built_per_user_when_users_configured(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Per-user routing: a multi-user datalab gets one client per
+        referenced (datalab, user) pair, keyed `datalab/user`."""
+        import os
+
+        from datalab_beholder.config import BeholderConfig
+        from datalab_beholder.daemon import BeholderDaemon
+
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+
+        config = BeholderConfig(
+            datalabs=[
+                {
+                    "name": "lab",
+                    "url": "https://lab.example.org",
+                    "users": [
+                        {"name": "alice", "api_key": "ak"},
+                        {"name": "bob", "api_key": "bk"},
+                    ],
+                }
+            ],
+            watched_paths=[
+                {
+                    "path": str(tmp_path / "a"),
+                    "name": "wp-a",
+                    "datalab": "lab",
+                    "user": "alice",
+                },
+                {
+                    "path": str(tmp_path / "b"),
+                    "name": "wp-b",
+                    "datalab": "lab",
+                    "user": "bob",
+                },
+            ],
+            state_db=tmp_path / "state.db",
+        )
+
+        from datalab_beholder import client as client_module
+        from datalab_beholder import daemon as daemon_module
+
+        seen_keys: list[str | None] = []
+
+        class FakeClient:
+            def __init__(self, datalab_api_url: str, log_level: str) -> None:
+                self.datalab_api_url = datalab_api_url
+                # Snapshot the env var that BaseDatalabClient would read.
+                seen_keys.append(os.environ.get("DATALAB_API_KEY"))
+
+        monkeypatch.setattr(client_module, "BeholderClient", FakeClient)
+        monkeypatch.setattr(daemon_module, "BeholderClient", FakeClient)
+
+        daemon = BeholderDaemon(config)
+
+        assert set(daemon._clients) == {"lab/alice", "lab/bob"}
+        assert daemon._clients_by_wp["wp-a"] is daemon._clients["lab/alice"]
+        assert daemon._clients_by_wp["wp-b"] is daemon._clients["lab/bob"]
+        # _build_clients sorts pairs deterministically (alice before bob)
+        # and sets DATALAB_API_KEY before each construction.
+        assert seen_keys == ["ak", "bk"]
+
+    def test_legacy_single_user_routing_unchanged(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A datalab without `users[]` keeps its plain `<name>` client
+        label so the GUI status panel keeps working unchanged."""
+        from datalab_beholder.config import BeholderConfig
+        from datalab_beholder.daemon import BeholderDaemon
+
+        (tmp_path / "a").mkdir()
+
+        config = BeholderConfig(
+            datalabs=[
+                {"name": "lab", "url": "https://lab.example.org", "api_key": "k"}
+            ],
+            watched_paths=[
+                {"path": str(tmp_path / "a"), "name": "wp-a", "datalab": "lab"}
+            ],
+            state_db=tmp_path / "state.db",
+        )
+
+        from datalab_beholder import client as client_module
+        from datalab_beholder import daemon as daemon_module
+
+        class FakeClient:
+            def __init__(self, datalab_api_url: str, log_level: str) -> None:
+                self.datalab_api_url = datalab_api_url
+
+        monkeypatch.setattr(client_module, "BeholderClient", FakeClient)
+        monkeypatch.setattr(daemon_module, "BeholderClient", FakeClient)
+
+        daemon = BeholderDaemon(config)
+        assert set(daemon._clients) == {"lab"}
+        assert daemon._clients_by_wp["wp-a"] is daemon._clients["lab"]

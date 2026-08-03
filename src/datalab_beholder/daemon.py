@@ -17,6 +17,15 @@ log = logging.getLogger(__name__)
 TICK_SECONDS = 1.0
 
 
+def _client_key(datalab: str, user: str | None) -> str:
+    """Stable label for the (datalab, user) → client mapping.
+
+    Single-key configs keep their plain `datalab` label so the GUI's
+    aggregated status panel keeps working unchanged.
+    """
+    return f"{datalab}/{user}" if user else datalab
+
+
 class BeholderDaemon:
     """Daemon that scans watched paths on layered cadences and attaches
     files whose path matched an ``id_pattern`` to their datalab item.
@@ -48,10 +57,11 @@ class BeholderDaemon:
 
         self._clients: dict[str, BeholderClient] = self._build_clients(config)
         # Routing table: each watched path resolves to exactly one client.
-        # Cross-field validation in BeholderConfig guarantees wp.datalab is set
-        # and references a real datalab name.
+        # Cross-field validation in BeholderConfig guarantees wp.datalab is set,
+        # references a real datalab name, and (for multi-user datalabs) that
+        # wp.user is either explicitly set or the datalab has a default key.
         self._clients_by_wp: dict[str, BeholderClient] = {
-            wp.name: self._clients[wp.datalab]
+            wp.name: self._clients[_client_key(wp.datalab, wp.user)]
             for wp in config.watched_paths
             if wp.datalab
         }
@@ -78,26 +88,53 @@ class BeholderDaemon:
 
     @staticmethod
     def _build_clients(config: BeholderConfig) -> dict[str, BeholderClient]:
-        """Construct one client per configured datalab.
+        """Construct one client per (datalab, user) pair actually in use.
 
         ``BaseDatalabClient`` reads its API key from the
-        ``DATALAB_API_KEY`` env var (or a deployment-prefixed variant)
-        during ``__init__``, so we set it from ``DatalabConfig.api_key``
-        per-construction. With multiple datalabs this just walks the
-        list and re-sets the env var each time — fine because each
-        client snapshots the key into its own ``_headers`` dict.
+        ``DATALAB_API_KEY`` env var during ``__init__``, so we set it
+        per-construction from the resolved key (user-specific when a
+        watched path pins a user, otherwise the datalab default).
+        Each client snapshots the key into its own ``_headers`` dict, so
+        re-setting the env var across iterations is safe.
+
+        Only pairs referenced by some watched path are built — otherwise
+        a multi-user datalab with two users but only one watched path
+        would burn an extra connection on construction (each client
+        eagerly handshakes with the server).
         """
         import os
 
+        # Distinct (datalab, user) pairs referenced by any watched path,
+        # plus a (datalab, None) entry for any datalab with a default
+        # api_key (so the GUI status panel reports its connection too).
+        pairs: set[tuple[str, str | None]] = set()
+        for wp in config.watched_paths:
+            if wp.datalab:
+                pairs.add((wp.datalab, wp.user))
+        for d in config.datalabs:
+            if d.api_key and (d.name, None) not in pairs and not d.users:
+                # Single-user datalabs keep the legacy (d.name, None)
+                # client even if no watched path references them yet.
+                pairs.add((d.name, None))
+
+        by_name = {d.name: d for d in config.datalabs}
         clients: dict[str, BeholderClient] = {}
         prev_env = os.environ.get("DATALAB_API_KEY")
         try:
-            for d in config.datalabs:
-                if d.api_key and d.api_key != "your-api-key-here":
-                    os.environ["DATALAB_API_KEY"] = d.api_key
-                # Otherwise leave whatever was already in the env so
-                # users can keep their key out of the YAML entirely.
-                clients[d.name] = BeholderClient(
+            for datalab_name, user_name in sorted(
+                pairs, key=lambda p: (p[0], p[1] or "")
+            ):
+                d = by_name[datalab_name]
+                key = d.resolve_api_key(user_name)
+                if key and key != "your-api-key-here":
+                    os.environ["DATALAB_API_KEY"] = key
+                else:
+                    # Leave whatever was already in the env so users can
+                    # keep their key out of the YAML entirely.
+                    os.environ.pop("DATALAB_API_KEY", None)
+                    if prev_env is not None:
+                        os.environ["DATALAB_API_KEY"] = prev_env
+                clients[_client_key(datalab_name, user_name)] = BeholderClient(
                     datalab_api_url=d.url,
                     log_level=config.log_level,
                 )

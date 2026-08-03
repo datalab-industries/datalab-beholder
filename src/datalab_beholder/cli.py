@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
@@ -217,39 +218,146 @@ def gui(config_path: Path | None, log_level: str | None) -> None:
     default=None,
     help="Path to config file. Default: config.yaml alongside the package/executable",
 )
-def status(config_path: Path | None) -> None:
-    """Show daemon state and sync history."""
-    from datalab_beholder.config import load_config
+@click.option(
+    "--match-limit",
+    type=int,
+    default=3,
+    show_default=True,
+    help="How many sample id_pattern matches to show per watched path.",
+)
+def status(config_path: Path | None, match_limit: int) -> None:
+    """Show daemon state, per-path routing, and sync history.
+
+    Connects to each configured (datalab, user) pair to verify the
+    resolved API key authenticates, then prints one block per watched
+    path showing where its files will be sent and a sample of files
+    that matched the configured `id_patterns`.
+    """
+    from datalab_beholder.config import LocalWatchedPath, load_config
+    from datalab_beholder.daemon import _client_key
     from datalab_beholder.state import StateStore
+
+    # Suppress the noisy datalab_api INFO logs that fire on client
+    # construction — `status` should be quiet by default.
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
 
     config = load_config(config_path)
 
-    if not config.state_db.exists():
-        click.echo("No state database found. Has the daemon been run?")
-        return
+    click.echo(f"Loaded config: {config_path or '(default)'}")
+    click.echo(f"  state_db: {config.state_db}")
+    click.echo(f"  schema version: {config.version}\n")
 
-    from datalab_beholder.config import LocalWatchedPath
+    # Build clients up front so each watched-path block can probe its
+    # resolved client. _build_clients does the env-var dance and the
+    # eager handshake; failures show up as exceptions we catch below.
+    from datalab_beholder.daemon import BeholderDaemon
 
-    state = StateStore(config.state_db)
+    click.echo("Datalabs:")
+    for d in config.datalabs:
+        users = ", ".join(u.name for u in d.users) or "(none)"
+        key_state = "set" if d.api_key else "missing"
+        click.echo(f"  {d.name} → {d.url}")
+        click.echo(f"    default api_key: {key_state}")
+        click.echo(f"    users: {users}")
+    click.echo()
+
+    # Client construction handshakes with each datalab. If a server is
+    # unreachable we don't want `status` to die — flag it on the offending
+    # watched paths and keep printing the rest of the report.
+    try:
+        clients = BeholderDaemon._build_clients(config)
+        client_error: str | None = None
+    except Exception as exc:
+        clients = {}
+        client_error = str(exc)
+        click.echo(f"Warning: could not connect to all datalabs: {exc}\n", err=True)
+
+    state: StateStore | None = None
+    if config.state_db.exists():
+        state = StateStore(config.state_db)
+
     try:
         for wp in config.watched_paths:
             location = str(getattr(wp, "path", wp.kind))
-            click.echo(f"\n{wp.name} ({location})")
+            route_label = _client_key(wp.datalab or "?", wp.user)
+            click.echo(f"{wp.name}")
+            click.echo(f"  path: {location}")
+            click.echo(f"  → datalab/user: {route_label}")
             if isinstance(wp, LocalWatchedPath):
-                click.echo(f"  Path exists: {wp.path.exists()}")
+                click.echo(f"  path exists: {wp.path.exists()}")
             else:
-                click.echo(f"  Kind: {wp.kind} (presence not checked)")
+                click.echo(f"  kind: {wp.kind} (presence not checked)")
 
-            last_sync = state.get_last_sync(wp.name)
-            if last_sync:
-                from datetime import datetime, timezone
-
-                dt = datetime.fromtimestamp(last_sync, tz=timezone.utc)
-                click.echo(f"  Last sync: {dt.isoformat()}")
+            client = (
+                clients.get(_client_key(wp.datalab, wp.user)) if wp.datalab else None
+            )
+            if client is None:
+                detail = f" ({client_error})" if client_error else ""
+                click.echo(f"  connection: skipped{detail}")
             else:
-                click.echo("  Last sync: never")
+                try:
+                    reachable, authed = client.check_connection()
+                except Exception as exc:
+                    click.echo(f"  connection: error ({exc})")
+                else:
+                    click.echo(
+                        f"  connection: reachable={reachable}, authenticated={authed}"
+                    )
 
-            pending = state.get_pending_changes(wp.name)
-            click.echo(f"  Pending changes: {len(pending)}")
+            if state is not None:
+                last_sync = state.get_last_sync(wp.name)
+                if last_sync:
+                    from datetime import datetime, timezone
+
+                    dt = datetime.fromtimestamp(last_sync, tz=timezone.utc)
+                    click.echo(f"  last sync: {dt.isoformat()}")
+                else:
+                    click.echo("  last sync: never")
+
+                pending = state.get_pending_changes(wp.name)
+                click.echo(f"  pending changes: {len(pending)}")
+
+            if isinstance(wp, LocalWatchedPath) and wp.path.exists():
+                _echo_sample_matches(wp, limit=match_limit)
+            click.echo()
     finally:
-        state.close()
+        if state is not None:
+            state.close()
+
+
+def _echo_sample_matches(wp: Any, *, limit: int) -> None:
+    """Print up to ``limit`` files under ``wp.path`` that match its
+    ``id_patterns``, with the resolved item_id/collection_id shown."""
+    from datalab_beholder.scanner import scan_directory
+
+    if not wp.id_patterns:
+        click.echo("  id_patterns: (none configured — all files match)")
+        return
+
+    try:
+        result = scan_directory(
+            root=wp.path,
+            name=wp.name,
+            include_patterns=wp.include_patterns,
+            exclude_patterns=wp.exclude_patterns,
+            id_patterns=wp.id_patterns,
+            item_id_template=wp.item_id_template,
+            collection_id_template=wp.collection_id_template,
+            max_depth=wp.max_depth,
+        )
+    except Exception as exc:
+        click.echo(f"  id_patterns: scan failed ({exc})")
+        return
+
+    matched = [e for e in result.entries if not e.is_directory and e.ids.get("item_id")]
+    click.echo(f"  id_patterns: {len(matched)}/{result.total_files} files match")
+    for entry in matched[:limit]:
+        ids = entry.ids
+        bits = [f"item_id={ids.get('item_id')!r}"]
+        if "collection_id" in ids:
+            bits.append(f"collection_id={ids['collection_id']!r}")
+        if "group_id" in ids:
+            bits.append(f"group_id={ids['group_id']!r}")
+        click.echo(f"    {entry.path} → {', '.join(bits)}")
+    if len(matched) > limit:
+        click.echo(f"    ... and {len(matched) - limit} more")

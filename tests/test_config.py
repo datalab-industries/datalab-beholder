@@ -387,6 +387,151 @@ class TestScanCadence:
         assert wp.scan.hot_window == 600
 
 
+class TestMultiUserConfig:
+    """`DatalabConfig.users[]` and `WatchedPath.user` resolution."""
+
+    def _dl_with_users(
+        self, name: str, users: list[dict], api_key: str | None = None
+    ) -> dict:
+        out: dict = {"name": name, "url": f"https://{name}.example.org", "users": users}
+        if api_key is not None:
+            out["api_key"] = api_key
+        return out
+
+    def test_users_default_empty(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[_dl("a")],
+            watched_paths=[_wp("wp1", tmp_path, datalab="a")],
+            state_db=tmp_path / "s.db",
+        )
+        assert cfg.datalabs[0].users == []
+
+    def test_user_pinned_to_named_entry(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[
+                self._dl_with_users(
+                    "lab",
+                    users=[
+                        {"name": "alice", "api_key": "ak"},
+                        {"name": "bob", "api_key": "bk"},
+                    ],
+                )
+            ],
+            watched_paths=[
+                {
+                    "path": str(tmp_path),
+                    "name": "wp1",
+                    "datalab": "lab",
+                    "user": "alice",
+                }
+            ],
+            state_db=tmp_path / "s.db",
+        )
+        assert cfg.watched_paths[0].user == "alice"
+        assert cfg.datalabs[0].resolve_api_key("alice") == "ak"
+        assert cfg.datalabs[0].resolve_api_key("bob") == "bk"
+        # No user → datalab default (None here, that's fine for the lookup)
+        assert cfg.datalabs[0].resolve_api_key(None) is None
+
+    def test_unknown_user_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as exc:
+            BeholderConfig(
+                datalabs=[
+                    self._dl_with_users(
+                        "lab",
+                        users=[{"name": "alice", "api_key": "ak"}],
+                        api_key="default",
+                    )
+                ],
+                watched_paths=[
+                    {
+                        "path": str(tmp_path),
+                        "name": "wp1",
+                        "datalab": "lab",
+                        "user": "ghost",
+                    }
+                ],
+                state_db=tmp_path / "s.db",
+            )
+        msg = str(exc.value)
+        assert "ghost" in msg
+        assert "alice" in msg
+
+    def test_multi_user_without_default_requires_explicit_user(
+        self, tmp_path: Path
+    ) -> None:
+        """No silent fallback: users[] non-empty + no datalab api_key →
+        watched_path must specify a user."""
+        with pytest.raises(ValidationError) as exc:
+            BeholderConfig(
+                datalabs=[
+                    self._dl_with_users(
+                        "lab",
+                        users=[
+                            {"name": "alice", "api_key": "ak"},
+                            {"name": "bob", "api_key": "bk"},
+                        ],
+                    )
+                ],
+                watched_paths=[_wp("wp1", tmp_path, datalab="lab")],
+                state_db=tmp_path / "s.db",
+            )
+        msg = str(exc.value)
+        assert "wp1" in msg
+        assert "user" in msg
+
+    def test_multi_user_with_default_falls_back_when_user_omitted(
+        self, tmp_path: Path
+    ) -> None:
+        cfg = BeholderConfig(
+            datalabs=[
+                self._dl_with_users(
+                    "lab",
+                    users=[{"name": "alice", "api_key": "ak"}],
+                    api_key="default",
+                )
+            ],
+            watched_paths=[_wp("wp1", tmp_path, datalab="lab")],
+            state_db=tmp_path / "s.db",
+        )
+        assert cfg.watched_paths[0].user is None
+        assert cfg.datalabs[0].resolve_api_key(None) == "default"
+
+    def test_duplicate_user_names_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError) as exc:
+            BeholderConfig(
+                datalabs=[
+                    self._dl_with_users(
+                        "lab",
+                        users=[
+                            {"name": "alice", "api_key": "a"},
+                            {"name": "alice", "api_key": "b"},
+                        ],
+                        api_key="default",
+                    )
+                ],
+                watched_paths=[_wp("wp1", tmp_path, datalab="lab")],
+                state_db=tmp_path / "s.db",
+            )
+        assert "alice" in str(exc.value)
+        assert "unique" in str(exc.value).lower()
+
+    def test_resolve_api_key_unknown_user_raises(self, tmp_path: Path) -> None:
+        cfg = BeholderConfig(
+            datalabs=[
+                self._dl_with_users(
+                    "lab",
+                    users=[{"name": "alice", "api_key": "ak"}],
+                    api_key="default",
+                )
+            ],
+            watched_paths=[_wp("wp1", tmp_path, datalab="lab")],
+            state_db=tmp_path / "s.db",
+        )
+        with pytest.raises(KeyError):
+            cfg.datalabs[0].resolve_api_key("nobody")
+
+
 class TestConfigVersioning:
     def test_default_version_is_latest(self, tmp_path: Path) -> None:
         cfg = BeholderConfig(

@@ -188,6 +188,18 @@ class WatchedPathBase(BaseModel):
         None,
         description="Name of the datalab instance to post to (must match a datalab in the config)",
     )
+    user: str | None = Field(
+        None,
+        description=(
+            "Optional user name to use when posting to the datalab. Must "
+            "match a `users[].name` entry on the referenced datalab. If "
+            "unset, the daemon falls back to the datalab's top-level "
+            "`api_key` — but only if one is configured. With multi-user "
+            "datalabs, omitting both `user` and the datalab `api_key` is "
+            "rejected at load time so beholder doesn't silently pick a "
+            "wrong identity."
+        ),
+    )
     scan: ScanCadence = Field(
         default_factory=ScanCadence,
         description="Per-tier scan cadence for this path.",
@@ -388,6 +400,29 @@ class SyncConfig(BaseModel):
     metadata_interval: int = 1200
 
 
+class UserConfig(BaseModel):
+    """A named user identity sharing access to a single datalab instance.
+
+    When a datalab is configured with one or more users, a watched path
+    can opt into a specific user's API key with `user: <name>`. The
+    datalab-level `api_key` remains as a fallback for watched paths that
+    don't pin a user.
+    """
+
+    name: str = Field(
+        ...,
+        description="Identifier referenced from `watched_paths[].user`.",
+    )
+    api_key: str | None = Field(
+        None,
+        description=(
+            "API key for this user. If unset, the daemon will (in a future "
+            "release) look the key up in the OS keyring under "
+            "`datalab-beholder:<datalab>/<user>`. For now it must be set."
+        ),
+    )
+
+
 class DatalabConfig(BaseModel):
     """Connection details for the target datalab instances."""
 
@@ -402,12 +437,47 @@ class DatalabConfig(BaseModel):
     api_key: str | None = Field(
         None,
         description=(
-            "API key for authenticating to the datalab instance. If unset, "
-            "the underlying datalab client looks it up from the appropriate "
-            "<PREFIX>_DATALAB_API_KEY env var, where <PREFIX> matches the "
-            "deployment's identifier prefix."
+            "Default API key for this datalab. Used by any watched path "
+            "that doesn't pin a `user`. With multi-user setups (`users[]` "
+            "non-empty), this becomes the explicit fallback for "
+            "user-less watched paths; if you want every watched path to "
+            "be tied to a named user, leave this unset and require "
+            "`user:` on each watched path."
         ),
     )
+    users: list[UserConfig] = Field(
+        default_factory=list,
+        description=(
+            "Optional list of named users sharing this datalab. Each user "
+            "carries their own API key; watched paths reference a user by "
+            "name. An empty list (the default) preserves the single-key "
+            "behaviour."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_unique_user_names(self) -> DatalabConfig:
+        names = [u.name for u in self.users]
+        duplicates = {n for n in names if names.count(n) > 1}
+        if duplicates:
+            raise ValueError(
+                f"datalab {self.name!r}: user names must be unique within "
+                f"a datalab; duplicates: {sorted(duplicates)}"
+            )
+        return self
+
+    def resolve_api_key(self, user: str | None) -> str | None:
+        """Return the API key for the given user, or the datalab default
+        when ``user`` is None. Raises ``KeyError`` for an unknown user."""
+        if user is None:
+            return self.api_key
+        for u in self.users:
+            if u.name == user:
+                return u.api_key
+        raise KeyError(
+            f"datalab {self.name!r} has no user named {user!r}; "
+            f"configured: {sorted(u.name for u in self.users)}"
+        )
 
 
 class BeholderConfig(BaseModel):
@@ -468,6 +538,7 @@ class BeholderConfig(BaseModel):
             )
 
         valid = set(names)
+        by_name = {d.name: d for d in self.datalabs}
         for wp in self.watched_paths:
             if wp.datalab is None:
                 if len(self.datalabs) == 1:
@@ -481,6 +552,26 @@ class BeholderConfig(BaseModel):
                 raise ValueError(
                     f"watched_path {wp.name!r} references unknown datalab "
                     f"{wp.datalab!r}; configured: {sorted(valid)}"
+                )
+
+            d = by_name[wp.datalab]
+            user_names = {u.name for u in d.users}
+            if wp.user is not None:
+                if wp.user not in user_names:
+                    raise ValueError(
+                        f"watched_path {wp.name!r} references unknown user "
+                        f"{wp.user!r} on datalab {wp.datalab!r}; "
+                        f"configured users: {sorted(user_names)}"
+                    )
+            elif d.users and not d.api_key:
+                # Multi-user datalab with no default key — the watched
+                # path must pin a user explicitly, otherwise we would
+                # silently pick someone's identity.
+                raise ValueError(
+                    f"watched_path {wp.name!r} on datalab {wp.datalab!r} "
+                    f"must specify a `user:` (configured users: "
+                    f"{sorted(user_names)}), or the datalab needs a "
+                    "top-level `api_key` to use as a default."
                 )
         return self
 
