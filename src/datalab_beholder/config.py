@@ -63,6 +63,12 @@ watched_paths:
     item_id_template: "{group_id}-{item_id}"
     # collection_id_template: "{group_id}"
     # max_depth: null  # unlimited
+    # Optional: glob pattern (matched against the basename) -> datalab block
+    # type. After a matching file is attached, a block of that type is
+    # created on the item if one doesn't already exist.
+    # block_patterns:
+    #   "*.mpr": "cycle"
+    #   "*.nda": "cycle"
     # scan:
     #   hot_interval: 60        # stat recently-modified files
     #   warm_interval: 3600     # directory-mtime walk
@@ -159,6 +165,18 @@ class WatchedPathBase(BaseModel):
         ),
     )
 
+    block_patterns: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Maps unix glob patterns (matched against the file's basename, same syntax as "
+            "include_patterns) to a datalab block type. After a matching file is attached, "
+            "the daemon checks whether the item already has a block of that type; if not, it "
+            "creates one and wires it to the newly-attached file. Patterns are tried in order "
+            "and the first match wins."
+        ),
+        examples=[{"*.mpr": "cycle", "*.nda": "cycle"}],
+    )
+
     item_id_template: str | None = Field(
         None,
         description=(
@@ -197,6 +215,18 @@ class WatchedPathBase(BaseModel):
     @classmethod
     def validate_id_patterns(cls, v: list[str]) -> list[str]:
         return _validate_id_patterns(v)
+
+    @field_validator("block_patterns")
+    @classmethod
+    def validate_block_patterns(cls, v: dict[str, str]) -> dict[str, str]:
+        for pattern, block_type in v.items():
+            if not pattern:
+                raise ValueError("block_patterns keys must be non-empty glob patterns")
+            if not block_type:
+                raise ValueError(
+                    f"block_patterns[{pattern!r}] must map to a non-empty block type"
+                )
+        return v
 
     def hot_scan(self, state: StateStore) -> DiffResult:
         """Stat recently-modified files; cheap, runs frequently."""

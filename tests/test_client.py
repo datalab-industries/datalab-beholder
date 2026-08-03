@@ -204,3 +204,87 @@ class TestBeholderClient:
 
         req = mock_transport.requests[0]
         assert req.headers["DATALAB-API-KEY"] == "test-key"
+
+    def test_find_block_for_file_empty_when_no_blocks_obj(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        assert client.find_block_for_file({}, "cycle", "file-xyz") is None
+
+    def test_find_block_for_file_matches_type_and_file_id(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        item = {
+            "blocks_obj": {
+                "block-1": {"blocktype": "cycle", "file_id": "file-xyz"},
+                "block-2": {"blocktype": "raman", "file_id": "file-abc"},
+            }
+        }
+        assert client.find_block_for_file(item, "cycle", "file-xyz") == "block-1"
+
+    def test_find_block_for_file_same_type_different_file_is_no_match(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        """A block of the right type but wired to a different file must
+        not be treated as a match — each file gets its own block."""
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        item = {
+            "blocks_obj": {
+                "block-1": {"blocktype": "cycle", "file_id": "file-other"},
+            }
+        }
+        assert client.find_block_for_file(item, "cycle", "file-xyz") is None
+
+    def test_create_block_posts_to_add_data_block(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        mock_transport.add_response(
+            "POST",
+            "/add-data-block/",
+            status_code=200,
+            json_data={"new_block_obj": {"blocktype": "cycle"}},
+        )
+        mock_transport.add_response(
+            "GET",
+            "/get-item-data/item-1",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "item-1",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "file_ObjectIds": ["file-xyz"],
+                }
+            },
+        )
+        mock_transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={"new_block_data": {"blocktype": "cycle", "file_id": "file-xyz"}},
+        )
+
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        result = client.create_block(
+            item_id="item-1", block_type="cycle", file_id="file-xyz"
+        )
+
+        assert result is not None
+        assert result.get("blocktype") == "cycle"
+        methods = [(r.method, r.url.path) for r in mock_transport.requests]
+        assert ("POST", "/add-data-block/") in methods
+
+    def test_create_block_error_returns_none(self, mock_transport, monkeypatch) -> None:
+        mock_transport.add_response(
+            "POST",
+            "/add-data-block/",
+            status_code=500,
+            json_data={"error": "boom"},
+        )
+
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        result = client.create_block(
+            item_id="item-1", block_type="cycle", file_id="file-xyz"
+        )
+        assert result is None

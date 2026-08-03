@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import logging
 import signal
 import threading
@@ -15,6 +16,15 @@ from datalab_beholder.state import StateStore
 log = logging.getLogger(__name__)
 
 TICK_SECONDS = 1.0
+
+
+def _match_block_type(filename: str, block_patterns: dict[str, str]) -> str | None:
+    """Return the block type for the first pattern in ``block_patterns``
+    that matches ``filename``, or ``None`` if nothing matches."""
+    for pattern, block_type in block_patterns.items():
+        if fnmatch.fnmatch(filename, pattern):
+            return block_type
+    return None
 
 
 class BeholderDaemon:
@@ -279,7 +289,12 @@ class BeholderDaemon:
            with the same basename. If found, upload with
            ``replace_file_id`` to overwrite in place; otherwise upload
            as a new attachment.
-        4. Mark successful uploads synced. Failures are left un-synced
+        4. If the file matched a ``block_patterns`` entry and the item
+           doesn't already have a block of that type wired to this
+           exact file (matched via the block's own ``file_id``, since
+           the file's own record isn't reliably kept in sync), create
+           one wired to the newly-uploaded file.
+        5. Mark successful uploads synced. Failures are left un-synced
            and retried on the next tick.
 
         File uploads only support local paths today; SSH/Cloud entries
@@ -349,6 +364,27 @@ class BeholderDaemon:
                         item_id,
                         f" (replaced file {replace_id})" if replace_id else "",
                     )
+
+                    block_type = _match_block_type(file_path.name, wp.block_patterns)
+                    file_id = result.get("file_id")
+                    if (
+                        block_type
+                        and file_id
+                        and client.find_block_for_file(item, block_type, file_id)
+                        is None
+                    ):
+                        block = client.create_block(
+                            item_id=item_id,
+                            block_type=block_type,
+                            file_id=file_id,
+                        )
+                        if block is not None:
+                            log.info(
+                                "Created %s block on item %s for %s",
+                                block_type,
+                                item_id,
+                                entry.path,
+                            )
 
             if synced:
                 self._state.mark_synced(wp.name, synced)
