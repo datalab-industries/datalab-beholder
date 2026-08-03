@@ -360,6 +360,36 @@ class TestDiscriminatedUnion:
                 method(state=None)  # type: ignore[arg-type]
 
 
+class TestBlockPatterns:
+    def test_defaults_to_empty(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(path=tmp_path, name="wp")
+        assert wp.block_patterns == {}
+
+    def test_accepts_pattern_to_block_type_map(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(
+            path=tmp_path,
+            name="wp",
+            block_patterns={"*.mpr": "cycle", "*.nda": "cycle"},
+        )
+        assert wp.block_patterns == {"*.mpr": "cycle", "*.nda": "cycle"}
+
+    def test_empty_pattern_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError, match="non-empty glob patterns"):
+            LocalWatchedPath(
+                path=tmp_path,
+                name="wp",
+                block_patterns={"": "cycle"},
+            )
+
+    def test_empty_block_type_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError, match="non-empty block type"):
+            LocalWatchedPath(
+                path=tmp_path,
+                name="wp",
+                block_patterns={"*.mpr": ""},
+            )
+
+
 class TestScanCadence:
     def test_defaults_present(self, tmp_path: Path) -> None:
         wp = LocalWatchedPath(path=tmp_path, name="wp")

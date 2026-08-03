@@ -1,6 +1,6 @@
 """HTTP client for communicating with a datalab instance.
 
-Subclasses :class:`datalab_api.DatalabClient` to inherit auth, session
+Subclasses ``datalab_api.DatalabClient`` to inherit auth, session
 management, version negotiation, and the standard CRUD surface
 (``get_item``, ``create_item``, ``upload_file``, ...). Adds only the
 small surface the beholder daemon needs: a non-raising connection
@@ -110,8 +110,8 @@ class BeholderClient(DatalabClient):
     def find_existing_file_id(self, item: dict[str, Any], filename: str) -> str | None:
         """Look up the immutable file id of an attachment by basename.
 
-        ``item`` is the dict returned by :meth:`fetch_item` /
-        :meth:`ensure_item`. Returns the first match, or ``None`` if
+        ``item`` is the dict returned by ``fetch_item`` /
+        ``ensure_item``. Returns the first match, or ``None`` if
         nothing on the item shares that filename.
 
         Comparison prefers ``original_name`` (the unaltered filename the
@@ -133,6 +133,44 @@ class BeholderClient(DatalabClient):
                         return str(file_id)
                     break
         return None
+
+    def find_block_for_file(
+        self, item: dict[str, Any], block_type: str, file_id: str
+    ) -> str | None:
+        """Return the id of an existing ``block_type`` block wired to
+        ``file_id``, or ``None`` if no such block exists.
+
+        ``item`` is the dict returned by ``fetch_item`` /
+        ``ensure_item``. Deliberately checks each block's own
+        ``file_id`` field (set when we create/update a block) rather
+        than the file's own record on the item — the latter is not
+        reliably kept in sync by the server. A freshly-created item
+        (or one fetched without full item data) simply has no
+        ``blocks_obj``, so this returns ``None`` rather than raising.
+        """
+        for block_id, block in (item.get("blocks_obj") or {}).items():
+            if block.get("blocktype") == block_type and block.get("file_id") == file_id:
+                return block_id
+        return None
+
+    def create_block(
+        self, item_id: str, block_type: str, file_id: str
+    ) -> dict[str, Any] | None:
+        """Create a ``block_type`` block on ``item_id``, wired to ``file_id``.
+
+        ``file_id`` must already be uploaded and attached to the item.
+        Errors are logged and swallowed so the daemon loop survives a
+        single bad item or transient hiccup.
+        """
+        try:
+            return super().create_data_block(
+                item_id=item_id, block_type=block_type, file_ids=file_id
+            )
+        except DatalabAPIError as e:
+            log.error(
+                "Failed to create %s block on item %s: %s", block_type, item_id, e
+            )
+            return None
 
     def attach_file(
         self,

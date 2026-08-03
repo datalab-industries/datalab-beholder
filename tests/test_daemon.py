@@ -359,6 +359,189 @@ class TestE2EAttachFlow:
         body = upload_reqs[0].content
         assert b"other-id" not in body
 
+    def test_block_pattern_match_creates_block(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A file matching block_patterns gets a block created for it once
+        it has been attached, when the item has no block of that type."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                    "file_ObjectIds": ["file-xyz"],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+        transport.add_response(
+            "POST",
+            "/add-data-block/",
+            status_code=200,
+            json_data={"new_block_obj": {"blocktype": "cycle"}},
+        )
+        transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={"new_block_data": {"blocktype": "cycle", "file_id": "file-xyz"}},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/add-data-block/") in methods
+        add_block_req = next(
+            r
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/add-data-block/"
+        )
+        assert b'"block_type":"cycle"' in add_block_req.content
+
+    def test_block_pattern_skipped_when_block_already_wired_to_this_file(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """If the item already has a block of the matched type wired to
+        this exact file (e.g. a modified file re-attached with the same
+        immutable id), no new block is created."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {
+                        "block-1": {"blocktype": "cycle", "file_id": "file-xyz"}
+                    },
+                    "display_order": ["block-1"],
+                    "files": [],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/add-data-block/") not in methods
+
+    def test_block_pattern_creates_new_block_for_different_file_same_type(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A block of the matched type already exists, but wired to a
+        *different* file — this file still gets its own new block."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {
+                        "block-1": {"blocktype": "cycle", "file_id": "some-other-file"}
+                    },
+                    "display_order": ["block-1"],
+                    "files": [],
+                    "file_ObjectIds": ["file-xyz"],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+        transport.add_response(
+            "POST",
+            "/add-data-block/",
+            status_code=200,
+            json_data={"new_block_obj": {"blocktype": "cycle"}},
+        )
+        transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={"new_block_data": {"blocktype": "cycle", "file_id": "file-xyz"}},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/add-data-block/") in methods
+
+    def test_no_block_pattern_configured_skips_block_creation(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Default (empty) block_patterns never triggers block creation."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/add-data-block/") not in methods
+
     def test_unmatched_file_is_not_uploaded(self, tmp_path: Path, monkeypatch) -> None:
         """`notes.txt` doesn't satisfy the include_patterns nor the
         id_pattern; it must never reach the server."""
