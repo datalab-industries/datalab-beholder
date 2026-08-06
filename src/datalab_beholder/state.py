@@ -129,8 +129,15 @@ class StateStore:
     `watched_path_name` and route to the right table internally.
     """
 
-    def __init__(self, db_path: Path):
+    def __init__(self, db_path: Path, read_only: bool = False):
         self._db_path = Path(db_path)
+        if read_only:
+            # SQLite URI mode=ro guarantees a dry-run consumer can never
+            # mutate the daemon's state, and refuses to create a missing
+            # DB rather than silently seeding an empty one.
+            self._conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
+            self._conn.row_factory = sqlite3.Row
+            return
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
@@ -332,6 +339,69 @@ class StateStore:
                 )
 
         self._conn.commit()
+        return diff
+
+    def classify_scan(self, scan_result: ScanResult) -> DiffResult:
+        """Read-only counterpart of `update_from_scan` for dry runs.
+
+        Classifies each scanned entry against stored state without
+        writing anything. Unlike `update_from_scan`, an entry whose stat
+        matches the stored row but whose stored status is still pending
+        (``new``/``modified``) is reported under that pending status —
+        that is what the attach loop would pick up on its next pass.
+
+        An unregistered watched path (fresh install) classifies every
+        entry as new.
+        """
+        watched_name = scan_result.name
+        diff = DiffResult(watched_path_name=watched_name)
+        table = self._table_for(watched_name, allow_missing=True)
+
+        existing: dict[str, dict] = {}
+        if table is not None:
+            cursor = self._conn.execute(
+                f"SELECT path, size, modified, status, ids_json FROM files__{table}"
+            )
+            existing = {row["path"]: dict(row) for row in cursor}
+
+        seen_paths: set[str] = set()
+        for entry in scan_result.entries:
+            seen_paths.add(entry.path)
+            prev = existing.get(entry.path)
+            if prev is None:
+                status = "new"
+            elif prev["size"] != entry.size or prev["modified"] != entry.modified:
+                status = "modified"
+            elif prev["status"] in ("new", "modified"):
+                status = prev["status"]
+            else:
+                diff.unchanged += 1
+                continue
+            bucket = diff.new if status == "new" else diff.modified
+            bucket.append(
+                DiffEntry(
+                    path=entry.path,
+                    size=entry.size,
+                    modified=entry.modified,
+                    is_directory=entry.is_directory,
+                    status=status,
+                    ids=dict(entry.ids),
+                )
+            )
+
+        for path, data in existing.items():
+            if path in seen_paths or data["status"] == "deleted":
+                continue
+            diff.deleted.append(
+                DiffEntry(
+                    path=path,
+                    size=data["size"],
+                    modified=data["modified"],
+                    is_directory=False,
+                    status="deleted",
+                    ids=json.loads(data.get("ids_json") or "{}"),
+                )
+            )
         return diff
 
     def update_from_warm_scan(self, warm: WarmScanResult) -> DiffResult:

@@ -10,6 +10,7 @@ dependencies = [
     "datalab-api ~= 0.5",
     "pydantic ~= 2.12",
     "pyyaml ~= 6.0",
+    "rich>=13,<15",
 ]
 
 [project.scripts]

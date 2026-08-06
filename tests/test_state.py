@@ -98,6 +98,57 @@ class TestStateStore:
         assert "notes.txt" in {e.path for e in diff.deleted}
         store.close()
 
+    def test_classify_scan_is_read_only_and_pending_aware(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        db_path = tmp_path / "test.db"
+        store = StateStore(db_path)
+        store.register_watched_path("test")
+        store.update_from_scan(scan_directory(tmp_tree, name="test"))
+        store.mark_synced("test", ["file1.csv"])
+        store.close()
+
+        (tmp_tree / "notes.txt").unlink()
+        (tmp_tree / "file1.csv").write_text("a,b,c\n1,2,3\n4,5,6\n")
+
+        ro = StateStore(db_path, read_only=True)
+        diff = ro.classify_scan(scan_directory(tmp_tree, name="test"))
+
+        # Synced file with changed stats → modified; never-synced files
+        # keep their pending 'new' status; the deleted file is reported
+        # without being written back.
+        assert "file1.csv" in {e.path for e in diff.modified}
+        assert "file2.raw" in {e.path for e in diff.new}
+        assert "notes.txt" in {e.path for e in diff.deleted}
+
+        # Nothing was written: a second classify sees the same picture.
+        diff2 = ro.classify_scan(scan_directory(tmp_tree, name="test"))
+        assert {e.path for e in diff2.modified} == {e.path for e in diff.modified}
+        assert {e.path for e in diff2.deleted} == {e.path for e in diff.deleted}
+        ro.close()
+
+    def test_read_only_store_rejects_writes(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        db_path = tmp_path / "test.db"
+        store = StateStore(db_path)
+        store.register_watched_path("test")
+        store.close()
+
+        ro = StateStore(db_path, read_only=True)
+        with pytest.raises(sqlite3.OperationalError):
+            ro.update_from_scan(scan_directory(tmp_tree, name="test"))
+        ro.close()
+
+    def test_classify_scan_unregistered_path_all_new(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        store = StateStore(tmp_path / "test.db")
+        diff = store.classify_scan(scan_directory(tmp_tree, name="never-registered"))
+        assert len(diff.new) > 0
+        assert diff.unchanged == 0
+        store.close()
+
     def test_mark_synced(self, tmp_path: Path, tmp_tree: Path) -> None:
         store = StateStore(tmp_path / "test.db")
         store.register_watched_path("test")
