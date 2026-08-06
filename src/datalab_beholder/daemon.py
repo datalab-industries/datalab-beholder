@@ -7,6 +7,7 @@ import logging
 import signal
 import threading
 import time
+from dataclasses import dataclass
 from typing import Any
 
 from datalab_beholder.client import BeholderClient
@@ -87,36 +88,40 @@ class BeholderDaemon:
         return self._clients_by_wp[wp.name]
 
     @staticmethod
-    def _build_clients(config: BeholderConfig) -> dict[str, BeholderClient]:
-        """Construct one client per configured datalab.
+    def _build_client(datalab: Any, log_level: str) -> BeholderClient:
+        """Construct a client for one configured datalab.
 
         ``BaseDatalabClient`` reads its API key from the
         ``DATALAB_API_KEY`` env var (or a deployment-prefixed variant)
         during ``__init__``, so we set it from ``DatalabConfig.api_key``
-        per-construction. With multiple datalabs this just walks the
-        list and re-sets the env var each time — fine because each
-        client snapshots the key into its own ``_headers`` dict.
+        for the duration of construction — fine because the client
+        snapshots the key into its own ``_headers`` dict.
         """
         import os
 
-        clients: dict[str, BeholderClient] = {}
         prev_env = os.environ.get("DATALAB_API_KEY")
         try:
-            for d in config.datalabs:
-                if d.api_key and d.api_key != "your-api-key-here":
-                    os.environ["DATALAB_API_KEY"] = d.api_key
-                # Otherwise leave whatever was already in the env so
-                # users can keep their key out of the YAML entirely.
-                clients[d.name] = BeholderClient(
-                    datalab_api_url=d.url,
-                    log_level=config.log_level,
-                )
+            if datalab.api_key and datalab.api_key != "your-api-key-here":
+                os.environ["DATALAB_API_KEY"] = datalab.api_key
+            # Otherwise leave whatever was already in the env so users
+            # can keep their key out of the YAML entirely.
+            return BeholderClient(
+                datalab_api_url=datalab.url,
+                log_level=log_level,
+            )
         finally:
             if prev_env is None:
                 os.environ.pop("DATALAB_API_KEY", None)
             else:
                 os.environ["DATALAB_API_KEY"] = prev_env
-        return clients
+
+    @staticmethod
+    def _build_clients(config: BeholderConfig) -> dict[str, BeholderClient]:
+        """Construct one client per configured datalab."""
+        return {
+            d.name: BeholderDaemon._build_client(d, config.log_level)
+            for d in config.datalabs
+        }
 
     def _build_daemon_id(self) -> str:
         names = sorted(wp.name for wp in self._config.watched_paths)
@@ -389,3 +394,301 @@ class BeholderDaemon:
             if synced:
                 self._state.mark_synced(wp.name, synced)
             self._state.remove_deleted(wp.name)
+
+
+# ----------------------------------------------------------------------
+# Dry run
+# ----------------------------------------------------------------------
+
+
+@dataclass
+class PlannedAction:
+    """One thing the daemon would have done, as reported by `dry_run`."""
+
+    watched_path: str
+    action: str  # "create_item" | "upload" | "replace" | "create_block" | "skip"
+    item_id: str
+    path: str = ""
+    detail: str = ""
+
+
+def dry_run(
+    config: BeholderConfig,
+    clients: dict[str, BeholderClient] | None = None,
+) -> list[PlannedAction]:
+    """Simulate one full scan + attach pass without changing anything.
+
+    Walks each local watched path with a full (cold-style) scan,
+    classifies the results against the state DB opened read-only (a
+    missing DB classifies everything as new), then probes the datalab
+    server with GET-only requests to report exactly what the daemon
+    would do on its next attach pass. Neither the state DB nor the
+    server is written to.
+
+    A datalab that can't be reached is not fatal: the scan and local
+    classification still run, pending files are reported with an
+    ``attach_unknown`` action, and the connection failure is logged as
+    an error.
+
+    ``clients`` may be injected (used by tests); otherwise one client
+    per configured datalab is constructed as in the real daemon. A
+    datalab name missing from an injected mapping is treated as
+    unreachable.
+    """
+    from datalab_beholder.scanner import scan_directory
+    from datalab_beholder.state import DiffEntry, DiffResult
+
+    if clients is None:
+        clients = {}
+        for d in config.datalabs:
+            try:
+                clients[d.name] = BeholderDaemon._build_client(d, config.log_level)
+            except Exception as e:
+                log.error(
+                    "Cannot connect to datalab %r at %s: %s — scans will "
+                    "still run, but server-side state for its watched "
+                    "paths is unknown",
+                    d.name,
+                    d.url,
+                    e,
+                )
+
+    state: StateStore | None = None
+    if config.state_db.exists():
+        state = StateStore(config.state_db, read_only=True)
+    else:
+        log.info(
+            "No state DB at %s — treating every matched file as new",
+            config.state_db,
+        )
+
+    actions: list[PlannedAction] = []
+    try:
+        for wp in config.watched_paths:
+            if not isinstance(wp, LocalWatchedPath):
+                log.info(
+                    "Skipping %s: only local paths supported (kind=%s)",
+                    wp.name,
+                    wp.kind,
+                )
+                continue
+
+            # A scan that cannot run at all is fatal: a dry run against a
+            # missing/mistyped path would otherwise report "0 files
+            # matched", which reads as "nothing to do" instead of
+            # "misconfigured".
+            if not wp.path.is_dir():
+                raise FileNotFoundError(
+                    f"watched path {wp.name!r} cannot be scanned: {wp.path} "
+                    "does not exist or is not a directory"
+                )
+
+            log.info("Dry-run scan of %s (%s)", wp.name, wp.path)
+            scan = scan_directory(
+                wp.path,
+                name=wp.name,
+                include_patterns=wp.include_patterns,
+                exclude_patterns=wp.exclude_patterns,
+                id_patterns=wp.id_patterns,
+                item_id_template=wp.item_id_template,
+                collection_id_template=wp.collection_id_template,
+                max_depth=wp.max_depth,
+            )
+            log.info(
+                "%s: %d file(s) matched patterns in %d ms "
+                "(run with --log-level debug to see every skipped file)",
+                wp.name,
+                scan.total_files,
+                scan.scan_duration_ms,
+            )
+
+            if state is not None:
+                diff = state.classify_scan(scan)
+            else:
+                diff = DiffResult(watched_path_name=wp.name)
+                diff.new = [
+                    DiffEntry(
+                        path=e.path,
+                        size=e.size,
+                        modified=e.modified,
+                        is_directory=False,
+                        status="new",
+                        ids=dict(e.ids),
+                    )
+                    for e in scan.entries
+                ]
+
+            log.info(
+                "%s vs local state: %d new, %d modified, %d unchanged, %d deleted",
+                wp.name,
+                len(diff.new),
+                len(diff.modified),
+                diff.unchanged,
+                len(diff.deleted),
+            )
+            if diff.deleted:
+                log.info(
+                    "%s: %d deleted file(s) would be pruned from local state "
+                    "(no server change)",
+                    wp.name,
+                    len(diff.deleted),
+                )
+
+            pending = diff.new + diff.modified
+            attachable = [e for e in pending if e.ids.get("item_id")]
+            if len(pending) != len(attachable):
+                log.info(
+                    "%s: %d pending file(s) have no item_id and would not be attached",
+                    wp.name,
+                    len(pending) - len(attachable),
+                )
+            if not attachable:
+                continue
+
+            # Config validation guarantees wp.datalab resolves to a real
+            # datalab name (see BeholderConfig.validate_datalab_refs);
+            # it can still be absent from `clients` if unreachable.
+            assert wp.datalab is not None
+            client = clients.get(wp.datalab)
+            if client is None:
+                log.error(
+                    "%s: datalab %r is unreachable — %d pending file(s) "
+                    "would be attached, but whether items/files/blocks "
+                    "would be created or replaced is unknown",
+                    wp.name,
+                    wp.datalab,
+                    len(attachable),
+                )
+                for entry in attachable:
+                    log.info(
+                        "would attach %s to item %s (server state unknown)",
+                        entry.path,
+                        entry.ids["item_id"],
+                    )
+                    actions.append(
+                        PlannedAction(
+                            wp.name,
+                            "attach_unknown",
+                            entry.ids["item_id"],
+                            entry.path,
+                            "server unreachable",
+                        )
+                    )
+                continue
+
+            item_cache: dict[str, dict[str, Any] | None] = {}
+            would_create: set[str] = set()
+
+            for entry in attachable:
+                item_id = entry.ids["item_id"]
+                filename = entry.path.rsplit("/", 1)[-1]
+
+                if item_id not in item_cache:
+                    item_cache[item_id] = client.fetch_item(item_id)
+                item = item_cache[item_id]
+
+                replace_id: str | None = None
+                if item is None:
+                    if not wp.item_type:
+                        log.warning(
+                            "would skip %s: item %s does not exist and no "
+                            "item_type is configured to create it",
+                            entry.path,
+                            item_id,
+                        )
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "skip",
+                                item_id,
+                                entry.path,
+                                "item missing, not creatable",
+                            )
+                        )
+                        continue
+                    if item_id not in would_create:
+                        would_create.add(item_id)
+                        log.info(
+                            "would create item %s (type=%s, collection=%s, group=%s)",
+                            item_id,
+                            wp.item_type,
+                            entry.ids.get("collection_id"),
+                            entry.ids.get("group_id"),
+                        )
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "create_item",
+                                item_id,
+                                detail=f"type={wp.item_type}",
+                            )
+                        )
+                else:
+                    replace_id = client.find_existing_file_id(item, filename)
+
+                if replace_id:
+                    log.info(
+                        "would replace file %s on item %s with %s",
+                        replace_id,
+                        item_id,
+                        entry.path,
+                    )
+                    actions.append(
+                        PlannedAction(
+                            wp.name,
+                            "replace",
+                            item_id,
+                            entry.path,
+                            f"file_id={replace_id}",
+                        )
+                    )
+                else:
+                    log.info(
+                        "would upload %s as a new file on item %s",
+                        entry.path,
+                        item_id,
+                    )
+                    actions.append(
+                        PlannedAction(wp.name, "upload", item_id, entry.path)
+                    )
+
+                block_type = _match_block_type(filename, wp.block_patterns)
+                if block_type:
+                    # A block can only already exist for a file that is
+                    # already attached (i.e. the replace case); a new
+                    # upload gets a fresh file_id, so the daemon would
+                    # always create a block for it.
+                    has_block = (
+                        item is not None
+                        and replace_id is not None
+                        and client.find_block_for_file(item, block_type, replace_id)
+                        is not None
+                    )
+                    if has_block:
+                        log.debug(
+                            "item %s already has a %s block for %s",
+                            item_id,
+                            block_type,
+                            entry.path,
+                        )
+                    else:
+                        log.info(
+                            "would create %s block on item %s for %s",
+                            block_type,
+                            item_id,
+                            entry.path,
+                        )
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "create_block",
+                                item_id,
+                                entry.path,
+                                detail=block_type,
+                            )
+                        )
+    finally:
+        if state is not None:
+            state.close()
+
+    return actions

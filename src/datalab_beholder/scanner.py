@@ -84,6 +84,14 @@ def _matches_any(name: str, patterns: list[str]) -> bool:
     return any(fnmatch.fnmatch(name, p) for p in patterns if p)
 
 
+def _first_match(name: str, patterns: list[str]) -> str | None:
+    """Return the first glob pattern that matches ``name``, or None."""
+    for p in patterns:
+        if p and fnmatch.fnmatch(name, p):
+            return p
+    return None
+
+
 def _match_id_patterns(
     path: str, patterns: list[re.Pattern[str]]
 ) -> dict[str, str] | None:
@@ -200,12 +208,14 @@ def scan_directory(
 
                 entry_name = entry.name
 
-                if _matches_any(entry_name, exclude_patterns):
-                    continue
-
                 rel_path = os.path.relpath(entry.path, root)
                 # Normalize to forward slashes for cross-platform consistency
                 rel_path = rel_path.replace(os.sep, "/")
+
+                excluded_by = _first_match(entry_name, exclude_patterns)
+                if excluded_by is not None:
+                    log.debug("skip %s: excluded by pattern %r", rel_path, excluded_by)
+                    continue
 
                 if entry.is_dir(follow_symlinks=False):
                     total_dirs += 1
@@ -220,15 +230,23 @@ def scan_directory(
                         )
                     if max_depth is None or depth < max_depth:
                         _scan(Path(entry.path), depth + 1)
+                    else:
+                        log.debug("skip %s/: max_depth %d reached", rel_path, max_depth)
                 elif entry.is_file(follow_symlinks=False):
                     if not _matches_any(entry_name, include_patterns):
+                        log.debug(
+                            "skip %s: does not match include_patterns %s",
+                            rel_path,
+                            include_patterns,
+                        )
                         continue
 
                     ids = _match_id_patterns(rel_path, compiled_id_patterns)
                     if ids is None:
                         log.debug(
-                            "%s does not match ID patterns, skipping",
+                            "skip %s: no id_pattern matched (patterns: %s)",
                             rel_path,
+                            id_patterns,
                         )
                         continue
 

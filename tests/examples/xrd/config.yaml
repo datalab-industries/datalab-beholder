@@ -1,0 +1,21 @@
+datalabs:
+- name: xrd
+  url: https://example.com
+  api_key: your-api-key-here
+log_level: debug
+sync:
+  metadata_interval: 1200
+watched_paths:
+- name: xrd-data
+  path: "./data"
+  datalab: xrd
+  item_type: samples
+  item_id_template: "{item_id}"
+  include_patterns:
+    - "*.raw"
+    - "*.brml"
+  block_patterns:
+    "*.raw": "xrd"
+    "*.brml": "brml"
+  id_patterns:
+    - ".*(?P<item_id>[A-Z]{6}).*"

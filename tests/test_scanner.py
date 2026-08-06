@@ -71,6 +71,31 @@ class TestScanDirectory:
         assert "temp" not in all_paths
         assert "temp/scratch.tmp" not in all_paths
 
+    def test_skip_reasons_logged_at_debug(self, tmp_tree: Path, caplog) -> None:
+        """Every non-matching file is debug-logged with the reason, so a
+        dry run at debug level explains exactly why files were skipped."""
+        with caplog.at_level("DEBUG", logger="datalab_beholder.scanner"):
+            scan_directory(
+                tmp_tree,
+                include_patterns=["*.csv"],
+                exclude_patterns=["*.tmp"],
+                id_patterns=[r"(?P<item_id>file1)\.csv$"],
+            )
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(
+            m.startswith("skip temp/scratch.tmp: excluded by pattern '*.tmp'")
+            for m in messages
+        )
+        assert any(
+            m.startswith("skip notes.txt: does not match include_patterns")
+            for m in messages
+        )
+        assert any(
+            m.startswith("skip subdir/file3.csv: no id_pattern matched")
+            for m in messages
+        )
+
     def test_max_depth_zero(self, tmp_tree: Path) -> None:
         """max_depth=0 should only scan the root level, no recursion."""
         result = scan_directory(tmp_tree, max_depth=0)

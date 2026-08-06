@@ -121,6 +121,18 @@ Starts the daemon. Blocks until interrupted (Ctrl+C / SIGTERM). This is the defa
 datalab-beholder start [--config PATH] [--log-level debug|info|warning|error]
 ```
 
+### `datalab-beholder dry-run`
+
+Simulates one full scan + attach pass without changing anything — no uploads, no item/block creation, no writes to the local state DB (it is opened read-only; a missing one is treated as "everything is new"). The server is only queried with GETs to work out what a real run would do: which items would be created, which files uploaded or replaced, and which blocks created. A summary is printed at the end.
+
+```
+datalab-beholder dry-run [--config PATH] [--log-level debug|info|warning|error]
+```
+
+At `--log-level debug`, every file that *doesn't* match is logged with the reason (excluded by which pattern, failed `include_patterns`, no `id_pattern` matched) — the fastest way to debug a config against a real directory tree.
+
+An unreachable datalab is not fatal: the scan and pattern report still run, pending files are listed as "would attach (server state unknown)", and the connection failure is logged as an error. A watched path that cannot be scanned (missing or not a directory) *is* fatal — a mistyped path would otherwise read as "nothing to do".
+
 ### `datalab-beholder scan`
 
 One-off directory scan — useful for testing your patterns and id templates before running the daemon. With `--config`, scans every `watched_paths[]` entry and prints one JSON object per line per path; without `--config`, takes ad-hoc args.
