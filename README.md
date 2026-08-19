@@ -179,6 +179,8 @@ uv run pyinstaller beholder.spec
 
 The resulting binary in `dist/` launches the GUI and reads `config.yaml` from the directory next to the executable. Pre-built Windows binaries are produced by the project's CI workflow.
 
+PyInstaller does not cross-compile — a Windows binary must be built on Windows. To build binaries for an arbitrary commit without tagging a release, trigger the CI workflow manually (Actions → CI → *Run workflow*, or `gh workflow run ci.yml --ref main -f ref=<sha>`); manual runs upload the Linux/Windows/macOS binaries as downloadable workflow artifacts.
+
 ## Configuration
 
 | Section | Field | Default | Description |

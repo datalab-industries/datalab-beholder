@@ -8,6 +8,14 @@ on:
     branches: [main]
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          Commit SHA, branch, or tag to build. Leave empty to build the
+          branch the workflow is dispatched from.
+        required: false
+        default: ""
 
 env:
   PYTEST_ADDOPTS: "--color=yes"
@@ -23,6 +31,9 @@ jobs:
         python-version: ["3.10", "3.11", "3.12"]
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Empty for non-dispatch events → the event's default ref.
+          ref: ${{ inputs.ref }}
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -51,6 +62,11 @@ jobs:
             artifact: datalab-beholder-macos
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          # Full history so setuptools_scm derives a real version for
+          # any commit, not just tagged ones.
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@v7
 
@@ -84,7 +100,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.artifact }}
