@@ -299,8 +299,10 @@ class BeholderDaemon:
            exact file (matched via the block's own ``file_id``, since
            the file's own record isn't reliably kept in sync), create
            one wired to the newly-uploaded file.
-        5. Mark successful uploads synced. Failures are left un-synced
-           and retried on the next tick.
+        5. Mark successful uploads synced. A ``304`` reply (the server
+           already holds identical content, matched by hash) counts as
+           success, so an unchanged-but-retouched file isn't re-uploaded
+           forever. Failures are left un-synced and retried next tick.
 
         File uploads only support local paths today; SSH/Cloud entries
         are skipped with a debug log until those backends grow upload
@@ -363,12 +365,23 @@ class BeholderDaemon:
                 )
                 if result is not None:
                     synced.append(entry.path)
-                    log.info(
-                        "Attached %s -> item %s%s",
-                        entry.path,
-                        item_id,
-                        f" (replaced file {replace_id})" if replace_id else "",
-                    )
+                    if result.get("not_modified"):
+                        # Server already holds identical content (it
+                        # compares hashes). Marking it synced anyway is
+                        # the point: otherwise the entry stays pending
+                        # and we re-upload it on every tick.
+                        log.info(
+                            "%s already up to date on item %s",
+                            entry.path,
+                            item_id,
+                        )
+                    else:
+                        log.info(
+                            "Attached %s -> item %s%s",
+                            entry.path,
+                            item_id,
+                            f" (replaced file {replace_id})" if replace_id else "",
+                        )
 
                     block_type = _match_block_type(file_path.name, wp.block_patterns)
                     file_id = result.get("file_id")

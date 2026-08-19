@@ -184,6 +184,13 @@ class BeholderClient(DatalabClient):
         in place (preserves the file's immutable id and any blocks
         pointing at it). Errors are logged and swallowed so the daemon
         loop survives a single bad item or transient hiccup.
+
+        A replace upload whose content the server already holds comes
+        back with ``not_modified=True`` and the existing ``file_id``
+        (datalab compares hashes and replies ``304``; datalab-api turns
+        that into a normal result). That is a successful no-op, not an
+        error — the caller marks the file synced and stops re-uploading
+        it on every tick.
         """
         try:
             result = super().upload_file(
@@ -191,13 +198,28 @@ class BeholderClient(DatalabClient):
                 file_path=file_path,
                 replace_file_id=replace_file_id,
             )
-            self.last_request_ok = True
-            return result
         except FileNotFoundError:
             log.warning("File vanished before upload: %s", file_path)
+            self.last_request_ok = False
+            return None
+        except OSError as e:
+            # Locked by the acquisition software, or the share dropped
+            # out mid-read — both routine on an instrument PC watching a
+            # network mount.
+            log.warning("Could not read %s for upload: %s", file_path, e)
             self.last_request_ok = False
             return None
         except DatalabAPIError as e:
             log.error("Failed to attach %s to item %s: %s", file_path, item_id, e)
             self.last_request_ok = False
             return None
+
+        if result.get("not_modified"):
+            log.debug(
+                "%s already up to date on item %s, no upload needed",
+                file_path,
+                item_id,
+            )
+
+        self.last_request_ok = True
+        return result

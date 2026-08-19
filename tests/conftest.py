@@ -88,7 +88,9 @@ class MockTransport(httpx.BaseTransport):
         json_data: dict | None = None,
     ) -> None:
         key = f"{method.upper()} {path}"
-        body = json.dumps(json_data or {}).encode()
+        # A real 304 carries no entity body, so don't invent one — the
+        # upload path has to cope with an empty response.
+        body = b"" if status_code == 304 else json.dumps(json_data or {}).encode()
         self.responses[key] = httpx.Response(
             status_code=status_code,
             content=body,
