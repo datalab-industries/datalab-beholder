@@ -264,6 +264,50 @@ class TestE2EAttachFlow:
         pending = daemon._state.get_pending_changes("cells")
         assert not any(e.path == "42-cell-formation.mpr" for e in pending)
 
+    def test_not_modified_reply_marks_file_synced(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A 304 from the replace path means the server already holds
+        identical content (datalab-api >= 0.6 reports it as a
+        ``not_modified`` result). The file must still be marked synced —
+        otherwise it stays pending and is re-uploaded on every tick."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [
+                        {"name": "42-cell-formation.mpr", "immutable_id": "old-id"},
+                    ],
+                }
+            },
+        )
+        transport.add_response("POST", "/upload-file/", status_code=304)
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        pending = daemon._state.get_pending_changes("cells")
+        assert not any(e.path == "42-cell-formation.mpr" for e in pending)
+
+        # ...and a second pass must not upload it again.
+        daemon.tick()
+        upload_calls = [
+            r
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/upload-file/"
+        ]
+        assert len(upload_calls) == 1
+
     def test_existing_item_with_matching_filename_replaces(
         self, tmp_path: Path, monkeypatch
     ) -> None:

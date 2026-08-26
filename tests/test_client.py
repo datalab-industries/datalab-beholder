@@ -34,7 +34,7 @@ class TestBeholderClient:
     def test_attach_file_success(
         self, mock_transport, monkeypatch, tmp_path: Path
     ) -> None:
-        # Parent's upload_file POSTs to /upload-file/ with status 201.
+        # A successful upload POSTs to /upload-file/ and returns 201.
         mock_transport.add_response(
             "POST",
             "/upload-file/",
@@ -50,6 +50,29 @@ class TestBeholderClient:
 
         assert result is not None
         assert result.get("file_id") == "file-xyz"
+        assert client.last_request_ok is True
+
+    def test_attach_file_not_modified_is_success(
+        self, mock_transport, monkeypatch, tmp_path: Path
+    ) -> None:
+        """A replace upload the server already holds comes back 304 with
+        an empty body, which datalab-api >= 0.6 surfaces as a normal
+        result carrying ``not_modified``. That is a successful no-op,
+        not an error: the existing file id is returned so the caller
+        marks it synced."""
+        mock_transport.add_response("POST", "/upload-file/", status_code=304)
+
+        test_file = tmp_path / "test.csv"
+        test_file.write_text("a,b,c\n1,2,3\n")
+
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        result = client.attach_file(
+            item_id="item-1", file_path=test_file, replace_file_id="old-id"
+        )
+
+        assert result is not None
+        assert result["not_modified"] is True
+        assert result["file_id"] == "old-id"
         assert client.last_request_ok is True
 
     def test_attach_file_missing_returns_none(
