@@ -203,6 +203,7 @@ PyInstaller does not cross-compile — a Windows binary must be built on Windows
 | `watched_paths[]` | `scan.cold_interval` | `86400` | Seconds between cold scans (full walk); `null` disables |
 | `watched_paths[]` | `scan.hot_window` | `86400` | "Recent" cutoff (s) for hot-scan eligibility |
 | `sync` | `metadata_interval` | `1200` | Seconds between attach passes |
+| | `reset_scan_clocks_on_startup` | `false` | Clear the stored per-path scan timestamps on startup, forcing a cold scan on the first tick |
 | | `log_level` | `info` | Logging verbosity |
 | | `state_db` | next to package/exe | Path to the local SQLite database |
 

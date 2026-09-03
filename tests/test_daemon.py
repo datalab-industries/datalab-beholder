@@ -82,6 +82,39 @@ class TestBeholderDaemon:
         # No HTTP requests yet — scanning hasn't happened.
         assert transport.requests == []
 
+    def test_setup_leaves_scan_clocks_alone_by_default(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon._state.update_scan_timestamp("test-data", "cold", 300.0)
+
+        assert config.reset_scan_clocks_on_startup is False
+        daemon.setup()
+
+        assert daemon._state.get_scan_timestamps("test-data").cold == 300.0
+
+    def test_setup_clears_scan_clocks_when_configured(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        config.reset_scan_clocks_on_startup = True
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon._state.update_scan_timestamp("test-data", "cold", 300.0)
+        daemon._state.update_max_dir_mtime("test-data", 12345.0)
+
+        daemon.setup()
+
+        ts = daemon._state.get_scan_timestamps("test-data")
+        assert ts.hot is None
+        assert ts.warm is None
+        assert ts.cold is None
+        assert ts.max_dir_mtime is None
+        # Cleared clocks mean the next tick picks the cold tier again.
+        assert daemon._select_scan_tier(config.watched_paths[0], time.time()) == "cold"
+
     def test_first_tick_runs_cold_scan_when_state_empty(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:

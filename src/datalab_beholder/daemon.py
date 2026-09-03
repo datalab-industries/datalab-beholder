@@ -133,6 +133,8 @@ class BeholderDaemon:
         No scanning happens here — the first `tick()` will trigger the
         appropriate scan tier per watched path based on its registry
         timestamps (which start out NULL → "infinitely stale" → run now).
+        If ``reset_scan_clocks_on_startup`` is set, those timestamps are
+        wiped here so every run behaves like a fresh one.
         """
         log.info("Starting beholder daemon (id=%s)", self._daemon_id)
         log.info(
@@ -144,6 +146,14 @@ class BeholderDaemon:
             ),
         )
         log.info("Attach interval: %ds", self._config.sync.metadata_interval)
+
+        if self._config.reset_scan_clocks_on_startup:
+            log.info(
+                "reset_scan_clocks_on_startup is set — clearing stored scan "
+                "timestamps; a cold scan will run on the first tick"
+            )
+            for wp in self._config.watched_paths:
+                self._state.clear_scan_timestamps(wp.name)
 
         if threading.current_thread() is threading.main_thread():
             for sig in (signal.SIGINT, signal.SIGTERM):
