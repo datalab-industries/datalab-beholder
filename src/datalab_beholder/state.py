@@ -728,6 +728,26 @@ class StateStore:
             self._conn.execute(sql, (ts, watched_path_name))
         self._conn.commit()
 
+    def clear_scan_timestamps(self, watched_path_name: str) -> None:
+        """Reset every scan clock for a watched path back to NULL.
+
+        The daemon treats NULL timestamps as "infinitely stale", so the
+        next tick runs a cold scan. ``last_max_dir_mtime`` is cleared too,
+        otherwise a subsequent warm scan would still short-circuit
+        subtrees it believes are unchanged.
+        """
+        cursor = self._conn.execute(
+            "UPDATE watched_paths SET last_hot_scan = NULL, "
+            "last_warm_scan = NULL, last_cold_scan = NULL, "
+            "last_max_dir_mtime = NULL WHERE name = ?",
+            (watched_path_name,),
+        )
+        if cursor.rowcount == 0:
+            raise UnknownWatchedPathError(
+                f"watched_path {watched_path_name!r} is not registered"
+            )
+        self._conn.commit()
+
     def update_max_dir_mtime(self, watched_path_name: str, mtime: float) -> None:
         """Record the maximum directory mtime seen during the last warm or
         cold scan; the next warm scan uses it to short-circuit unchanged

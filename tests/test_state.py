@@ -417,6 +417,41 @@ class TestScanTimestamps:
         assert store.get_scan_timestamps("wp").max_dir_mtime == 12345.0
         store.close()
 
+    def test_clear_scan_timestamps_resets_every_tier(self, tmp_path: Path) -> None:
+        store = StateStore(tmp_path / "test.db")
+        store.register_watched_path("wp")
+        store.update_scan_timestamp("wp", "cold", 300.0)
+        store.update_max_dir_mtime("wp", 12345.0)
+
+        store.clear_scan_timestamps("wp")
+
+        ts = store.get_scan_timestamps("wp")
+        assert ts.hot is None
+        assert ts.warm is None
+        assert ts.cold is None
+        assert ts.max_dir_mtime is None
+        store.close()
+
+    def test_clear_scan_timestamps_leaves_file_rows_alone(self, tmp_path: Path) -> None:
+        """Clearing the clocks forces a re-scan, not a re-upload."""
+        store = StateStore(tmp_path / "test.db")
+        store.register_watched_path("wp")
+        store.upsert_entries(
+            "wp",
+            [FileEntry(path="a.txt", size=1, modified=1.0, is_directory=False)],
+        )
+        store.mark_synced("wp", ["a.txt"])
+        store.clear_scan_timestamps("wp")
+        assert store.get_pending_changes("wp") == []
+        assert store.get_last_sync("wp") is not None
+        store.close()
+
+    def test_clear_scan_timestamps_unknown_path_rejected(self, tmp_path: Path) -> None:
+        store = StateStore(tmp_path / "test.db")
+        with pytest.raises(UnknownWatchedPathError):
+            store.clear_scan_timestamps("nope")
+        store.close()
+
     def test_unknown_kind_rejected(self, tmp_path: Path) -> None:
         store = StateStore(tmp_path / "test.db")
         store.register_watched_path("wp")

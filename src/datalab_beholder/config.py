@@ -78,6 +78,10 @@ watched_paths:
 sync:
   metadata_interval: 1200  # seconds (20 minutes) — attach cadence
 
+# Clear the stored per-path scan timestamps on startup, forcing a cold scan
+# on the first tick rather than waiting out the configured intervals.
+# reset_scan_clocks_on_startup: false
+
 log_level: "info"
 # state_db: "state.db"  # defaults to alongside the package/executable
 """
@@ -457,6 +461,16 @@ class BeholderConfig(BaseModel):
     )
     watched_paths: list[WatchedPath]
     sync: SyncConfig = SyncConfig()
+    reset_scan_clocks_on_startup: bool = Field(
+        False,
+        description=(
+            "If true, clear every watched path's stored hot/warm/cold scan "
+            "timestamps when the daemon starts, so a full cold scan runs on "
+            "the first tick instead of waiting for the configured interval. "
+            "File sync state is untouched — already-synced files are not "
+            "re-uploaded."
+        ),
+    )
     log_level: str = "info"
     state_db: Path = DEFAULT_STATE_DB_PATH
 
