@@ -332,7 +332,7 @@ def status(config_path: Path | None) -> None:
 
     from datalab_beholder.config import LocalWatchedPath
 
-    state = StateStore(config.state_db)
+    state = StateStore(config.state_db, read_only=True)
     try:
         for wp in config.watched_paths:
             location = str(getattr(wp, "path", wp.kind))
