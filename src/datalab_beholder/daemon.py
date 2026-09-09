@@ -105,9 +105,16 @@ class BeholderDaemon:
                 os.environ["DATALAB_API_KEY"] = datalab.api_key
             # Otherwise leave whatever was already in the env so users
             # can keep their key out of the YAML entirely.
+            if datalab.elevate_permissions:
+                log.info(
+                    "datalab %r configured for elevated (admin super-user) "
+                    "reads; item lookups will use sudo=1",
+                    datalab.name,
+                )
             return BeholderClient(
                 datalab_api_url=datalab.url,
                 log_level=log_level,
+                elevate_permissions=datalab.elevate_permissions,
             )
         finally:
             if prev_env is None:

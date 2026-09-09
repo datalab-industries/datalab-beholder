@@ -311,3 +311,79 @@ class TestBeholderClient:
             item_id="item-1", block_type="cycle", file_id="file-xyz"
         )
         assert result is None
+
+
+class TestElevatedPermissions:
+    """Elevation only touches reads.
+
+    datalab gives an active admin unrestricted access on writes with no
+    opt-in, but treats them as an ordinary user on GETs unless the
+    request carries ``sudo=1``. So the daemon only needs to elevate its
+    reads, and must not send the parameter on writes.
+    """
+
+    ITEM_RESPONSE = {
+        "status": "success",
+        "item_data": {
+            "item_id": "item-1",
+            "files": [],
+            "blocks_obj": {},
+            "display_order": [],
+        },
+    }
+
+    def test_get_appends_sudo_when_elevated(self, mock_transport, monkeypatch) -> None:
+        mock_transport.add_response(
+            "GET", "/get-item-data/item-1", json_data=self.ITEM_RESPONSE
+        )
+        client = _make_beholder_client(
+            mock_transport, monkeypatch, elevate_permissions=True
+        )
+
+        assert client.fetch_item("item-1") is not None
+        assert mock_transport.requests[-1].url.params.get("sudo") == "1"
+
+    def test_get_omits_sudo_by_default(self, mock_transport, monkeypatch) -> None:
+        mock_transport.add_response(
+            "GET", "/get-item-data/item-1", json_data=self.ITEM_RESPONSE
+        )
+        client = _make_beholder_client(mock_transport, monkeypatch)
+
+        assert client.fetch_item("item-1") is not None
+        assert "sudo" not in mock_transport.requests[-1].url.params
+
+    def test_writes_never_carry_sudo(
+        self, mock_transport, monkeypatch, tmp_path: Path
+    ) -> None:
+        mock_transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+        test_file = tmp_path / "test.csv"
+        test_file.write_text("a,b,c\n1,2,3\n")
+
+        client = _make_beholder_client(
+            mock_transport, monkeypatch, elevate_permissions=True
+        )
+        assert client.attach_file(item_id="item-1", file_path=test_file) is not None
+
+        upload = mock_transport.requests[-1]
+        assert upload.method == "POST"
+        assert "sudo" not in upload.url.params
+
+    def test_existing_query_params_are_preserved(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        """A caller-supplied `params` dict must survive elevation."""
+        mock_transport.add_response("GET", "/search-items/", json_data={"items": []})
+        client = _make_beholder_client(
+            mock_transport, monkeypatch, elevate_permissions=True
+        )
+
+        client._get(f"{client.datalab_api_url}/search-items/", params={"query": "abc"})
+
+        params = mock_transport.requests[-1].url.params
+        assert params.get("query") == "abc"
+        assert params.get("sudo") == "1"

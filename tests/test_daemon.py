@@ -967,8 +967,14 @@ class TestMultiDatalabRouting:
         constructed: list[str] = []
 
         class FakeClient:
-            def __init__(self, datalab_api_url: str, log_level: str) -> None:
+            def __init__(
+                self,
+                datalab_api_url: str,
+                log_level: str,
+                elevate_permissions: bool = False,
+            ) -> None:
                 self.datalab_api_url = datalab_api_url
+                self.elevate_permissions = elevate_permissions
                 constructed.append(datalab_api_url)
 
         monkeypatch.setattr(client_module, "BeholderClient", FakeClient)

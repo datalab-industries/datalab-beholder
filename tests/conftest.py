@@ -113,7 +113,9 @@ def mock_transport() -> MockTransport:
     return MockTransport()
 
 
-def _make_beholder_client(mock_transport: MockTransport, monkeypatch) -> BeholderClient:
+def _make_beholder_client(
+    mock_transport: MockTransport, monkeypatch, elevate_permissions: bool = False
+) -> BeholderClient:
     """Create a BeholderClient with mocked BaseDatalabClient init handshake.
 
     Monkeypatches _detect_api_url, get_info, and get_block_info so that
@@ -140,7 +142,10 @@ def _make_beholder_client(mock_transport: MockTransport, monkeypatch) -> Beholde
     monkeypatch.setattr(BeholderClient, "get_info", mock_get_info)
     monkeypatch.setattr(BeholderClient, "get_block_info", mock_get_block_info)
 
-    client = BeholderClient(datalab_api_url="https://test.example.org")
+    client = BeholderClient(
+        datalab_api_url="https://test.example.org",
+        elevate_permissions=elevate_permissions,
+    )
     # Replace the session with one that uses our mock transport
     client._session = httpx.Client(
         transport=mock_transport,
@@ -154,3 +159,11 @@ def _make_beholder_client(mock_transport: MockTransport, monkeypatch) -> Beholde
 def beholder_client(mock_transport: MockTransport, monkeypatch) -> BeholderClient:
     """A BeholderClient with mocked init and mock transport for requests."""
     return _make_beholder_client(mock_transport, monkeypatch)
+
+
+@pytest.fixture
+def elevated_beholder_client(
+    mock_transport: MockTransport, monkeypatch
+) -> BeholderClient:
+    """A BeholderClient running in admin super-user (elevated) mode."""
+    return _make_beholder_client(mock_transport, monkeypatch, elevate_permissions=True)

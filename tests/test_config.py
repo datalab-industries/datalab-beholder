@@ -480,3 +480,35 @@ class TestConfigVersioning:
         )
         cfg = load_config(cfg_path)
         assert cfg.version == LATEST_CONFIG_VERSION
+
+
+def test_elevate_permissions_defaults_off_and_threads_to_client(
+    tmp_path, monkeypatch
+) -> None:
+    """`elevate_permissions` defaults to False and is handed to the client."""
+    from datalab_beholder.config import DatalabConfig
+    from datalab_beholder.daemon import BeholderDaemon
+
+    assert (
+        DatalabConfig(name="d", url="https://x.example.org").elevate_permissions
+        is False
+    )
+
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("datalab_beholder.daemon.BeholderClient", FakeClient)
+
+    BeholderDaemon._build_client(
+        DatalabConfig(
+            name="d",
+            url="https://x.example.org",
+            api_key="k",
+            elevate_permissions=True,
+        ),
+        log_level="info",
+    )
+    assert captured["elevate_permissions"] is True

@@ -8,6 +8,10 @@ probe, an "ensure item exists" route, an existing-file lookup so
 modified files replace rather than duplicate, and a non-raising
 attach wrapper so a single bad item can't take the loop down.
 
+Admin permission elevation (datalab's ``sudo=1`` super-user mode) is
+inherited from ``datalab_api`` >= 0.5.3 — pass ``elevate_permissions``
+straight through to the parent constructor.
+
 Note: ``DatalabClient.__init__`` eagerly handshakes with the server
 (``_detect_api_url``, ``get_info``, ``get_block_info``). That is
 accepted for now; tests monkeypatch those hooks via

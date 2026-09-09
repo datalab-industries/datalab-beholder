@@ -41,6 +41,9 @@ datalabs:
   - name: "example"
     url: "https://datalab.example.org"
     api_key: "your-api-key-here"  # or set DATALAB_API_KEY env var
+    # Admin keys only: read other users' items so files can be attached to
+    # samples that aren't shared with this account.
+    # elevate_permissions: false
 
 watched_paths:
   - kind: "local"
@@ -440,6 +443,17 @@ class DatalabConfig(BaseModel):
             "the underlying datalab client looks it up from the appropriate "
             "<PREFIX>_DATALAB_API_KEY env var, where <PREFIX> matches the "
             "deployment's identifier prefix."
+        ),
+    )
+    elevate_permissions: bool = Field(
+        False,
+        description=(
+            "Run reads against this instance in datalab's admin super-user "
+            "mode, so the daemon can find and attach files to items owned by "
+            "other users without them being shared with the key's account. "
+            "Requires the configured API key to belong to an admin account; "
+            "it has no effect for a normal user. Note that uploads are still "
+            "recorded as created by the key's own account."
         ),
     )
 
