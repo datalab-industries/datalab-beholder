@@ -10,7 +10,7 @@
 
 > ⚠️ **Under construction.** APIs, config shape, and server endpoints are still in flux. Not yet recommended for production deployments.
 
-A daemon that watches instrument directories and attaches matching files to items in one or more [*datalab*](https://github.com/datalab-org/datalab) instances. The daemon extracts a datalab `item_id` from each file path with a regex, creates the item on the server if it doesn't already exist, and uploads the file to it — replacing in place if a same-named attachment is already there. Network traffic is outbound only; no inbound firewall rules are needed on the instrument PC.
+A daemon that watches instrument directories and attaches matching files to items in one or more [*datalab*](https://github.com/datalab-org/datalab) instances. The daemon extracts a *datalab* `item_id` from each file path with a regex, creates the item on the server if it doesn't already exist, and uploads the file to it — replacing in place if a same-named attachment is already there. Network traffic is outbound only; no inbound firewall rules are needed on the instrument PC.
 
 ## How it works
 
@@ -19,7 +19,7 @@ The daemon runs a single-threaded `tick()` loop that drives three independent sc
 1. **Cold scan** *(default: every 24 h)* — full directory walk; ground-truth reconciliation against the state DB.
 2. **Warm scan** *(every 1 h)* — directory-mtime-aware walk; discovers new files in active subtrees, skips per-file stats in cold subtrees.
 3. **Hot scan** *(every 60 s)* — re-stats only files modified in the last `hot_window` seconds; cheap and frequent.
-4. **Attach pass** *(every 20 min)* — for every file pending in state with an `item_id` extracted, ensure the datalab item exists then upload the file (with `replace_file_id` set if a same-named attachment is already there).
+4. **Attach pass** *(every 20 min)* — for every file pending in state with an `item_id` extracted, ensure the *datalab* item exists then upload the file (with `replace_file_id` set if a same-named attachment is already there).
 
 Each tier writes its findings into a local SQLite state DB; the attach pass drains whatever is pending. Cold can be disabled (`cold_interval: null`) for write-once archives.
 
@@ -37,7 +37,7 @@ Generate a config template:
 datalab-beholder init
 ```
 
-This writes `~/.datalab-beholder/config.yaml`. Edit it to point at your datalab instance and the directories you want to watch:
+This writes `~/.datalab-beholder/config.yaml`. Edit it to point at your *datalab* instance and the directories you want to watch:
 
 ```yaml
 datalabs:
@@ -67,13 +67,13 @@ sync:
 log_level: info
 ```
 
-Multiple `datalabs` entries are supported; each `watched_paths[].datalab` field references one by name. API keys are resolved by the underlying datalab client, which transparently checks `<PREFIX>_DATALAB_API_KEY` env vars (where `<PREFIX>` matches the deployment's identifier prefix) when no literal key is provided.
+Multiple `datalabs` entries are supported; each `watched_paths[].datalab` field references one by name. API keys are resolved by the underlying *datalab* client, which transparently checks `<PREFIX>_DATALAB_API_KEY` env vars (where `<PREFIX>` matches the deployment's identifier prefix) when no literal key is provided.
 
 ### Direct attach via `id_patterns`
 
 `id_patterns` is a list of Python regexes with named capture groups. Each file path (relative to the watched root) is tested against the patterns; the first match wins, and its captured groups become the file's identity for the rest of the pipeline. Allowed group names are:
 
-- `item_id` — **required** in every pattern; the datalab item the file attaches to.
+- `item_id` — **required** in every pattern; the *datalab* item the file attaches to.
 - `group_id` — optional; passed as `group_ids` when the daemon creates the item (access control).
 - `collection_id` — optional; passed as `collection_ids` when the daemon creates the item.
 
@@ -131,7 +131,7 @@ datalab-beholder dry-run [--config PATH] [--log-level debug|info|warning|error]
 
 At `--log-level debug`, every file that *doesn't* match is logged with the reason (excluded by which pattern, failed `include_patterns`, no `id_pattern` matched) — the fastest way to debug a config against a real directory tree.
 
-An unreachable datalab is not fatal: the scan and pattern report still run, pending files are listed as "would attach (server state unknown)", and the connection failure is logged as an error. A watched path that cannot be scanned (missing or not a directory) *is* fatal — a mistyped path would otherwise read as "nothing to do".
+An unreachable *datalab* is not fatal: the scan and pattern report still run, pending files are listed as "would attach (server state unknown)", and the connection failure is logged as an error. A watched path that cannot be scanned (missing or not a directory) *is* fatal — a mistyped path would otherwise read as "nothing to do".
 
 ### `datalab-beholder scan`
 
@@ -163,7 +163,7 @@ datalab-beholder status [--config PATH]
 
 ### `datalab-beholder gui`
 
-Launches a small Tkinter status GUI showing connection state per configured datalab, recent activity, and a settings editor for the YAML config. Driven by the same `tick()` loop as the CLI daemon.
+Launches a small Tkinter status GUI showing connection state per configured *datalab*, recent activity, and a settings editor for the YAML config. Driven by the same `tick()` loop as the CLI daemon.
 
 ```
 datalab-beholder gui [--config PATH]
@@ -186,17 +186,18 @@ PyInstaller does not cross-compile — a Windows binary must be built on Windows
 | Section | Field | Default | Description |
 |---------|-------|---------|-------------|
 | `datalabs[]` | `name` | *(required)* | Unique label referenced by `watched_paths[].datalab` |
-| `datalabs[]` | `url` | *(required)* | URL of the datalab instance |
-| `datalabs[]` | `api_key` | *(optional)* | API key; if omitted, resolved from env by the datalab client |
+| `datalabs[]` | `url` | *(required)* | URL of the *datalab* instance |
+| `datalabs[]` | `api_key` | *(optional)* | API key; if omitted, resolved from env by the *datalab* client |
+| `datalabs[]` | `elevate_permissions` | `false` | Admin keys only: read other users' items in *datalab*'s super-user mode |
 | `watched_paths[]` | `path` | *(required)* | Directory to watch |
-| `watched_paths[]` | `name` | *(required)* | Label shown in the datalab UI |
-| `watched_paths[]` | `datalab` | *(required if >1 datalab)* | Name of the datalab instance to push to |
+| `watched_paths[]` | `name` | *(required)* | Label shown in the *datalab* UI |
+| `watched_paths[]` | `datalab` | *(required if >1 datalab)* | Name of the *datalab* instance to push to |
 | `watched_paths[]` | `include_patterns` | `["*"]` | Glob patterns for files to include |
 | `watched_paths[]` | `exclude_patterns` | `[]` | Glob patterns for files to exclude |
 | `watched_paths[]` | `id_patterns` | `[]` | Regexes with named `item_id`/`group_id`/`collection_id` groups |
 | `watched_paths[]` | `item_id_template` | `null` | `str.format` template, e.g. `"{group_id}-{item_id}"` |
 | `watched_paths[]` | `collection_id_template` | `null` | `str.format` template for the collection id |
-| `watched_paths[]` | `item_type` | `null` | Datalab item type; required to auto-create missing items |
+| `watched_paths[]` | `item_type` | `null` | *datalab* item type; required to auto-create missing items |
 | `watched_paths[]` | `max_depth` | `10` | Max directory traversal depth |
 | `watched_paths[]` | `scan.hot_interval` | `60` | Seconds between hot scans (recently-modified file re-stat) |
 | `watched_paths[]` | `scan.warm_interval` | `3600` | Seconds between warm scans (directory-mtime walk) |
@@ -229,3 +230,35 @@ uv run pytest -v
 ```
 
 See [DESIGN.md](DESIGN.md) for the original design notes and motivation.
+
+### Attaching to other users' items
+
+By default beholder can only see items its API key's own account owns or has been shared on, so a file whose `item_id` belongs to someone else is skipped.
+
+Setting `elevate_permissions: true` on a *datalab* entry makes the daemon send *datalab*'s admin super-user flag (`?sudo=1`) on its reads, so it can look up and attach to any item on the instance:
+
+```yaml
+datalabs:
+  - name: "main"
+    url: "https://datalab.example.org"
+    api_key: "an-admin-users-api-key"
+    elevate_permissions: true
+```
+
+This requires the configured key to belong to an **admin** account.
+For a normal user the flag is ignored server-side and nothing changes.
+Writes are unaffected: *datalab* already grants admins full write access without an opt-in, so the flag is only ever sent on GETs.
+
+Two caveats:
+
+- Uploaded files are recorded with the *admin's* account as their creator, not
+  the item owner's. The owner still sees, downloads and can delete the file
+  (file access is inherited from the item), but the provenance reads as though
+  the admin attached it.
+- This only covers attaching to items that **already exist**. If beholder falls
+  back to creating an item, that item is owned by the admin account and the
+  intended user will not see it — so pair this with `group_id`/`collection_id`
+  capture groups, pre-create the items or disable auto-creation (via `item_type: null`) to avoid that.
+
+Longer term this is intended to be replaced by instrument-scoped API keys
+issued by an admin, rather than borrowing a human admin's key.
