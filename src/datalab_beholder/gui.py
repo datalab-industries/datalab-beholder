@@ -64,6 +64,48 @@ TICK_MS = 1000
 CONNECTION_CHECK_TICKS = 30  # check connection every 30s
 
 
+def _tooltip(widget: tk.Widget, text: str) -> None:
+    """Show ``text`` in a small borderless window while the cursor is over
+    ``widget``.
+
+    Several settings (notably the per-datalab ``sudo`` toggle) need more
+    explanation than fits in a label, and Tk has no built-in tooltip.
+    """
+    state: dict[str, tk.Toplevel | None] = {"window": None}
+
+    def show(_event: object = None) -> None:
+        if state["window"] is not None:
+            return
+        x = widget.winfo_rootx() + 20
+        y = widget.winfo_rooty() + widget.winfo_height() + 4
+        win = tk.Toplevel(widget)
+        win.wm_overrideredirect(True)
+        win.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            win,
+            text=text,
+            font=FONT_SM,
+            bg=BG_LIGHT,
+            fg=FG,
+            justify="left",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=4,
+        ).pack()
+        state["window"] = win
+
+    def hide(_event: object = None) -> None:
+        win = state["window"]
+        if win is not None:
+            win.destroy()
+            state["window"] = None
+
+    widget.bind("<Enter>", show)
+    widget.bind("<Leave>", hide)
+    widget.bind("<Destroy>", hide)
+
+
 # -- Logging handler that writes to a Tk Text widget -------------------------
 
 
@@ -530,6 +572,25 @@ class BeholderGUI(tk.Tk):
     def _open_settings(self) -> None:
         SettingsDialog(self, self._config_path, self._config)
 
+    def reload_config(self, config_path: Path) -> None:
+        """Re-read the config from disk after the settings dialog writes it.
+
+        Without this the window keeps the copy it loaded at startup, so
+        reopening Settings would show the pre-save values and saving again
+        would write them back — silently reverting the edit just made.
+        """
+        try:
+            self._config = load_config(config_path)
+        except Exception as e:  # pragma: no cover - defensive
+            log.error("Could not reload configuration from %s: %s", config_path, e)
+            return
+
+        self._config_path = config_path
+        if self._running:
+            log.warning(
+                "Configuration changed — restart the daemon for it to take effect."
+            )
+
     # -- Cleanup --------------------------------------------------------------
 
     def _on_close(self) -> None:
@@ -553,8 +614,8 @@ class SettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.title("Settings")
         self.configure(bg=BG)
-        self.geometry("500x460")
-        self.resizable(False, False)
+        self.geometry("620x560")
+        self.resizable(True, True)
         self.transient(parent)
         self.grab_set()
 
@@ -570,7 +631,7 @@ class SettingsDialog(tk.Toplevel):
         # -- Datalabs section -------------------------------------------------
         tk.Label(
             self,
-            text="Datalab Instances:",
+            text="datalab instances:",
             font=FONT_HEADING,
             bg=BG,
             fg=FG,
@@ -581,9 +642,20 @@ class SettingsDialog(tk.Toplevel):
         self._datalabs_frame.grid(row=1, column=0, sticky="ew", padx=12)
         self._datalabs_frame.columnconfigure(2, weight=1)
 
+        # Both row lists must exist before any row is built: adding a datalab
+        # row refreshes the path rows' datalab dropdowns, which reads
+        # `_path_rows`.
         self._datalab_rows: list[dict] = []
+        self._path_rows: list[dict] = []
+
         for d in self._config.datalabs:
-            self._add_datalab_row(d.name, d.url, d.api_key or "")
+            self._add_datalab_row(
+                d.name,
+                d.url,
+                d.api_key or "",
+                elevate_permissions=d.elevate_permissions,
+                original=d.model_dump(mode="json", exclude_defaults=True),
+            )
 
         tk.Button(
             self,
@@ -611,9 +683,15 @@ class SettingsDialog(tk.Toplevel):
         self._paths_frame.grid(row=5, column=0, sticky="ew", padx=12)
         self._paths_frame.columnconfigure(1, weight=1)
 
-        self._path_rows: list[dict] = []
         for wp in self._config.watched_paths:
-            self._add_path_row(wp.name, str(wp.path), wp.datalab or "")
+            original = wp.model_dump(mode="json", exclude_defaults=True)
+            # `kind` is each subclass's own default, so `exclude_defaults`
+            # drops it — but a watched path with no `kind` is read back as
+            # local, which would silently rewrite an ssh/cloud path.
+            original["kind"] = wp.kind
+            self._add_path_row(
+                wp.name, str(wp.path), wp.datalab or "", original=original
+            )
 
         tk.Button(
             self,
@@ -669,9 +747,72 @@ class SettingsDialog(tk.Toplevel):
             fg=FG_DIM,
         ).grid(row=0, column=2, sticky="w")
 
+        # -- Daemon options ---------------------------------------------------
+        tk.Label(
+            self,
+            text="Daemon:",
+            font=FONT_HEADING,
+            bg=BG,
+            fg=FG,
+            anchor="w",
+        ).grid(row=9, column=0, sticky="w", padx=12, pady=(12, 4))
+
+        options_frame = tk.Frame(self, bg=BG)
+        options_frame.grid(row=10, column=0, sticky="ew", padx=12)
+
+        tk.Label(
+            options_frame,
+            text="Log level:",
+            font=FONT_SM,
+            bg=BG,
+            fg=FG,
+        ).grid(row=0, column=0, sticky="w")
+
+        self._log_level_var = tk.StringVar(value=self._config.log_level)
+        log_level_menu = tk.OptionMenu(
+            options_frame,
+            self._log_level_var,
+            *("debug", "info", "warning", "error"),
+        )
+        log_level_menu.configure(
+            bg=BG_LIGHT,
+            fg=FG,
+            activebackground=BG,
+            activeforeground=FG,
+            highlightthickness=0,
+            relief="flat",
+            font=FONT_SM,
+        )
+        log_level_menu["menu"].configure(bg=BG_LIGHT, fg=FG)
+        log_level_menu.grid(row=0, column=1, sticky="w", padx=4)
+
+        self._reset_clocks_var = tk.BooleanVar(
+            value=self._config.reset_scan_clocks_on_startup,
+        )
+        reset_check = tk.Checkbutton(
+            options_frame,
+            text="Full rescan on startup",
+            variable=self._reset_clocks_var,
+            font=FONT_SM,
+            bg=BG,
+            fg=FG,
+            selectcolor=BG_LIGHT,
+            activebackground=BG,
+            activeforeground=FG,
+            relief="flat",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        reset_check.grid(row=0, column=2, sticky="w", padx=(16, 0))
+        _tooltip(
+            reset_check,
+            "Clear the stored scan timestamps on startup so a full cold scan\n"
+            "runs on the first tick. Already-synced files are not re-uploaded.",
+        )
+
         # -- Buttons ----------------------------------------------------------
         btn_frame = tk.Frame(self, bg=BG)
-        btn_frame.grid(row=9, column=0, sticky="e", padx=12, pady=(16, 12))
+        btn_frame.grid(row=11, column=0, sticky="e", padx=12, pady=(16, 12))
 
         tk.Button(
             btn_frame,
@@ -699,7 +840,14 @@ class SettingsDialog(tk.Toplevel):
             pady=4,
         ).pack(side="right")
 
-    def _add_datalab_row(self, name: str, url: str, api_key: str) -> None:
+    def _add_datalab_row(
+        self,
+        name: str,
+        url: str,
+        api_key: str,
+        elevate_permissions: bool = False,
+        original: dict | None = None,
+    ) -> None:
         row_idx = len(self._datalab_rows)
         frame = tk.Frame(self._datalabs_frame, bg=BG_LIGHT)
         frame.grid(row=row_idx, column=0, sticky="ew", pady=1)
@@ -738,6 +886,31 @@ class SettingsDialog(tk.Toplevel):
             relief="flat",
         ).grid(row=0, column=2, sticky="ew", padx=4, pady=2)
 
+        # Admin super-user mode: let an admin key attach data to items owned
+        # by other users. No-op server-side for a non-admin key.
+        elevate_var = tk.BooleanVar(value=elevate_permissions)
+        elevate_check = tk.Checkbutton(
+            frame,
+            text="sudo",
+            variable=elevate_var,
+            font=FONT_SM,
+            bg=BG_LIGHT,
+            fg=FG,
+            selectcolor=BG,
+            activebackground=BG_LIGHT,
+            activeforeground=FG,
+            relief="flat",
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        elevate_check.grid(row=0, column=3, padx=4, pady=2)
+        _tooltip(
+            elevate_check,
+            "Elevate permissions (admin keys only): read items belonging to\n"
+            "other users so files can be attached to samples that aren't\n"
+            "shared with this account. Ignored for non-admin keys.",
+        )
+
         def remove() -> None:
             frame.destroy()
             self._datalab_rows = [
@@ -755,7 +928,7 @@ class SettingsDialog(tk.Toplevel):
             activeforeground=RED,
             relief="flat",
             padx=4,
-        ).grid(row=0, column=3, padx=(0, 4), pady=2)
+        ).grid(row=0, column=4, padx=(0, 4), pady=2)
 
         # Re-render to keep the value commitments live in the entry; for the
         # name field, propagate live changes to the path-row dropdowns so the
@@ -768,6 +941,8 @@ class SettingsDialog(tk.Toplevel):
                 "name": name_var,
                 "url": url_var,
                 "api_key": api_key_var,
+                "elevate_permissions": elevate_var,
+                "original": original or {},
             }
         )
         self._refresh_path_dropdowns()
@@ -792,7 +967,13 @@ class SettingsDialog(tk.Toplevel):
             if row["datalab"].get() not in names:
                 row["datalab"].set("")
 
-    def _add_path_row(self, name: str, path: str, datalab: str = "") -> None:
+    def _add_path_row(
+        self,
+        name: str,
+        path: str,
+        datalab: str = "",
+        original: dict | None = None,
+    ) -> None:
         row_idx = len(self._path_rows)
         frame = tk.Frame(self._paths_frame, bg=BG_LIGHT)
         frame.grid(row=row_idx, column=0, sticky="ew", pady=1)
@@ -857,19 +1038,31 @@ class SettingsDialog(tk.Toplevel):
                 "path": path_var,
                 "datalab": datalab_var,
                 "datalab_menu": datalab_menu,
+                "original": original or {},
             }
         )
 
     def _add_path_dialog(self) -> None:
         AddPathDialog(self)
 
-    def add_path(self, name: str, path: str) -> None:
+    def add_path(
+        self,
+        name: str,
+        path: str,
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
+    ) -> None:
         """Called by AddPathDialog on confirmation."""
         # Datalab can be picked from the dropdown after the row is added; if
         # there's only one configured datalab, pre-select it.
         names = self._datalab_names()
         default = names[0] if len(names) == 1 else ""
-        self._add_path_row(name, path, default)
+        original: dict = {"kind": "local"}
+        if include_patterns:
+            original["include_patterns"] = include_patterns
+        if exclude_patterns:
+            original["exclude_patterns"] = exclude_patterns
+        self._add_path_row(name, path, default, original=original)
 
     def _save(self) -> None:
         try:
@@ -905,7 +1098,18 @@ class SettingsDialog(tk.Toplevel):
                 )
                 return
             seen_names.add(name)
-            datalabs.append({"name": name, "url": url, "api_key": api_key})
+            # Start from the entry as loaded so fields this dialog doesn't
+            # model are carried through untouched.
+            entry = dict(row["original"])
+            entry.update(
+                {
+                    "name": name,
+                    "url": url,
+                    "api_key": api_key,
+                    "elevate_permissions": row["elevate_permissions"].get(),
+                }
+            )
+            datalabs.append(entry)
 
         if not datalabs:
             messagebox.showerror(
@@ -929,9 +1133,12 @@ class SettingsDialog(tk.Toplevel):
                     parent=self,
                 )
                 return
-            entry = {"path": path, "name": name}
+            entry = dict(row["original"])
+            entry.update({"path": path, "name": name})
             if datalab:
                 entry["datalab"] = datalab
+            else:
+                entry.pop("datalab", None)
             watched_paths.append(entry)
 
         if not watched_paths:
@@ -942,14 +1149,27 @@ class SettingsDialog(tk.Toplevel):
             )
             return
 
-        config_dict = {
-            "datalabs": datalabs,
-            "watched_paths": watched_paths,
-            "sync": {
-                "metadata_interval": metadata_interval,
-            },
-            "log_level": self._config.log_level,
-        }
+        # Everything the dialog does not edit (state_db, per-path patterns,
+        # scan cadences, ...) is preserved by starting from the loaded config
+        # rather than rebuilding it from the widgets alone. Writing a settings
+        # dialog that only knows about a subset of the schema must not be a
+        # way to silently drop the rest of the user's YAML.
+        config_dict = self._config.model_dump(mode="json", exclude_defaults=True)
+        config_dict.update(
+            {
+                # `version` is written explicitly even when it matches the
+                # current default: a config that loses it is re-read as v1 and
+                # would be migrated a second time.
+                "version": self._config.version,
+                "datalabs": datalabs,
+                "watched_paths": watched_paths,
+                "sync": {
+                    "metadata_interval": metadata_interval,
+                },
+                "log_level": self._log_level_var.get(),
+                "reset_scan_clocks_on_startup": self._reset_clocks_var.get(),
+            }
+        )
 
         # Run the full pydantic validation chain so cross-field issues
         # (unknown datalab refs, ambiguous defaults, etc.) surface in the
@@ -973,6 +1193,7 @@ class SettingsDialog(tk.Toplevel):
             yaml.safe_dump(config_dict, f, default_flow_style=False)
 
         log.info("Configuration saved to %s", config_path)
+        self._parent.reload_config(config_path)
         self.destroy()
 
 
@@ -1139,5 +1360,13 @@ class AddPathDialog(tk.Toplevel):
             )
             return
 
-        self._parent.add_path(name, path)
+        def split(raw: str) -> list[str]:
+            return [part.strip() for part in raw.split(",") if part.strip()]
+
+        self._parent.add_path(
+            name,
+            path,
+            include_patterns=split(self._include_var.get()),
+            exclude_patterns=split(self._exclude_var.get()),
+        )
         self.destroy()

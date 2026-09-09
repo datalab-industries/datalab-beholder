@@ -13,7 +13,9 @@ cloud-sync paths).
 from __future__ import annotations
 
 import json
+import os
 import re
+import socket
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +33,19 @@ CREATE TABLE IF NOT EXISTS watched_paths (
     last_warm_scan REAL,
     last_cold_scan REAL,
     last_max_dir_mtime REAL
+);
+
+-- Single-row table recording which process currently owns this state DB.
+-- Written by the daemon on every tick; read by observers (the GUI) so they
+-- can tell "nothing is running" from "another daemon is doing the work".
+CREATE TABLE IF NOT EXISTS daemon_heartbeat (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    pid INTEGER,
+    hostname TEXT,
+    daemon_id TEXT,
+    started_at REAL,
+    last_tick REAL,
+    status TEXT
 );
 
 """
@@ -114,6 +129,52 @@ class DiffResult:
         if self.unchanged == 0 and not self.modified and not self.deleted:
             return "full"
         return "diff"
+
+
+@dataclass
+class PathSummary:
+    """Read-only rollup of one watched path's stored state.
+
+    Everything an observer needs to render a row without touching the
+    filesystem or the datalab server — counts come straight from the
+    per-path file table.
+    """
+
+    name: str
+    total: int = 0
+    pending: int = 0
+    synced: int = 0
+    new: int = 0
+    modified: int = 0
+    deleted: int = 0
+    last_synced: float | None = None
+    scans: ScanTimestamps = field(default_factory=ScanTimestamps)
+
+
+@dataclass
+class Heartbeat:
+    """A daemon's claim on the state DB, as recorded by `beat`."""
+
+    pid: int
+    hostname: str
+    daemon_id: str
+    started_at: float | None
+    last_tick: float
+    status: str
+
+    def is_stale(self, now: float | None = None, timeout: float = 30.0) -> bool:
+        """Whether the owning process has stopped updating.
+
+        A daemon ticks about once a second, so a heartbeat older than
+        `timeout` means it has exited, crashed, or been suspended. Used
+        to decide whether a claim still counts as live — a crashed daemon
+        must not lock the GUI out of starting a new one forever.
+        """
+        return (time() if now is None else now) - self.last_tick > timeout
+
+    def is_this_process(self) -> bool:
+        """Whether this heartbeat belongs to the calling process."""
+        return self.pid == os.getpid() and self.hostname == socket.gethostname()
 
 
 class UnknownWatchedPathError(KeyError):
@@ -757,6 +818,153 @@ class StateStore:
             (mtime, watched_path_name),
         )
         self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # Observer surface (read-only safe)
+    # ------------------------------------------------------------------
+
+    def _has_table(self, name: str) -> bool:
+        """Whether `name` exists. Needed because a read-only connection
+        cannot run the schema script, so a DB written by an older version
+        may legitimately be missing newer tables."""
+        return (
+            self._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (name,),
+            ).fetchone()
+            is not None
+        )
+
+    def path_summary(self, watched_path_name: str) -> PathSummary:
+        """Roll up one watched path's file table into counts and timestamps.
+
+        Safe on a read-only connection: pure SELECTs, and a path that is
+        registered but whose table is somehow absent yields zeroes rather
+        than raising, so one damaged row can't blank the whole display.
+        """
+        table = self._table_for(watched_path_name)
+        summary = PathSummary(name=watched_path_name)
+        if not self._has_table(f"files__{table}"):
+            return summary
+
+        rows = self._conn.execute(
+            f"SELECT status, COUNT(*) AS n FROM files__{table} GROUP BY status"
+        ).fetchall()
+        by_status = {row["status"]: row["n"] for row in rows}
+        summary.new = by_status.get("new", 0)
+        summary.modified = by_status.get("modified", 0)
+        summary.deleted = by_status.get("deleted", 0)
+        summary.synced = by_status.get("synced", 0)
+        summary.total = sum(by_status.values())
+        # "Pending" is what the daemon would push next: anything not yet
+        # synced and not tombstoned.
+        summary.pending = summary.new + summary.modified
+
+        row = self._conn.execute(
+            f"SELECT MAX(last_synced) AS ts FROM files__{table} "
+            "WHERE last_synced IS NOT NULL"
+        ).fetchone()
+        summary.last_synced = row["ts"] if row and row["ts"] is not None else None
+        summary.scans = self.get_scan_timestamps(watched_path_name)
+        return summary
+
+    def summarise(self) -> list[PathSummary]:
+        """`path_summary` for every registered watched path, name-ordered."""
+        return [self.path_summary(name) for name in self.list_watched_paths()]
+
+    def recent_files(
+        self, watched_path_name: str, limit: int = 20
+    ) -> list[dict[str, object]]:
+        """Most recently modified files for a path, newest first.
+
+        Feeds the observer's per-path detail view. Returns plain dicts
+        because the caller only renders them.
+        """
+        table = self._table_for(watched_path_name)
+        if not self._has_table(f"files__{table}"):
+            return []
+        rows = self._conn.execute(
+            f"SELECT path, size, modified, last_seen, last_synced, status, ids_json "
+            f"FROM files__{table} ORDER BY modified DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        out: list[dict[str, object]] = []
+        for row in rows:
+            entry = dict(row)
+            try:
+                entry["ids"] = json.loads(entry.pop("ids_json") or "{}")
+            except json.JSONDecodeError:
+                entry["ids"] = {}
+            out.append(entry)
+        return out
+
+    # ------------------------------------------------------------------
+    # Daemon heartbeat
+    # ------------------------------------------------------------------
+
+    def beat(
+        self, daemon_id: str, status: str, started_at: float | None = None
+    ) -> None:
+        """Record that this process currently owns the state DB.
+
+        Called on every daemon tick. An observer reads this to distinguish
+        "no daemon running" from "another daemon is doing the work", which
+        is what lets a GUI be launched alongside an already-running daemon
+        without either fighting for the database.
+        """
+        now = time()
+        self._conn.execute(
+            "INSERT INTO daemon_heartbeat "
+            "(id, pid, hostname, daemon_id, started_at, last_tick, status) "
+            "VALUES (1, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "pid=excluded.pid, hostname=excluded.hostname, "
+            "daemon_id=excluded.daemon_id, started_at=excluded.started_at, "
+            "last_tick=excluded.last_tick, status=excluded.status",
+            (
+                os.getpid(),
+                socket.gethostname(),
+                daemon_id,
+                started_at if started_at is not None else now,
+                now,
+                status,
+            ),
+        )
+        self._conn.commit()
+
+    def clear_heartbeat(self) -> None:
+        """Drop this process's claim on the DB, on clean shutdown.
+
+        Best-effort: a daemon that is killed never gets here, which is why
+        readers also treat a sufficiently old heartbeat as stale.
+        """
+        if not self._has_table("daemon_heartbeat"):
+            return
+        self._conn.execute("DELETE FROM daemon_heartbeat WHERE id = 1")
+        self._conn.commit()
+
+    def get_heartbeat(self) -> Heartbeat | None:
+        """Return the current claim on this DB, or None if unclaimed.
+
+        Tolerates the table being absent so a GUI can observe a state DB
+        written by a version of beholder that predates heartbeats.
+        """
+        if not self._has_table("daemon_heartbeat"):
+            return None
+        row = self._conn.execute(
+            "SELECT pid, hostname, daemon_id, started_at, last_tick, status "
+            "FROM daemon_heartbeat WHERE id = 1"
+        ).fetchone()
+        if row is None or row["last_tick"] is None:
+            return None
+        return Heartbeat(
+            pid=row["pid"],
+            hostname=row["hostname"] or "",
+            daemon_id=row["daemon_id"] or "",
+            started_at=row["started_at"],
+            last_tick=row["last_tick"],
+            status=row["status"] or "",
+        )
 
     # ------------------------------------------------------------------
     # Sync history

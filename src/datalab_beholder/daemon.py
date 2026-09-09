@@ -170,6 +170,8 @@ class BeholderDaemon:
             time.monotonic() - self._config.sync.metadata_interval
         )  # so attach runs on the first tick
         self._running = True
+        self._started_at = time.time()
+        self._beat()
 
     def tick(self) -> None:
         """One iteration of the main loop.
@@ -210,6 +212,22 @@ class BeholderDaemon:
             self._last_attach_mono = now_mono
 
         self._update_pending_count()
+        self._beat()
+
+    def _beat(self) -> None:
+        """Publish this process's claim on the state DB.
+
+        Best-effort: a heartbeat write failing must never take the sync
+        loop down, since the heartbeat is only ever read by observers.
+        """
+        try:
+            self._state.beat(
+                self._daemon_id,
+                self.sync_status,
+                started_at=getattr(self, "_started_at", None),
+            )
+        except Exception:
+            log.debug("Could not write daemon heartbeat", exc_info=True)
 
     def start(self) -> None:
         """CLI entry: setup + tick loop. Blocks until ``stop()`` is called."""
@@ -225,7 +243,16 @@ class BeholderDaemon:
 
     def shutdown(self) -> None:
         """Clean up resources. (No background threads to stop in the
-        scan-based design — this is here for symmetry with start().)"""
+        scan-based design — this is here for symmetry with start().)
+
+        Releases this process's heartbeat so an observer sees the DB go
+        unclaimed immediately, rather than waiting out the staleness
+        timeout.
+        """
+        try:
+            self._state.clear_heartbeat()
+        except Exception:
+            log.debug("Could not clear daemon heartbeat", exc_info=True)
         log.info("Daemon stopped.")
 
     def stop(self) -> None:
