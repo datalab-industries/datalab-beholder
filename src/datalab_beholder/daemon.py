@@ -113,7 +113,12 @@ class BeholderDaemon:
                 )
             return BeholderClient(
                 datalab_api_url=datalab.url,
-                log_level=log_level,
+                # `BaseDatalabClient` feeds this straight to
+                # `logging.basicConfig`, which rejects lowercase names. That
+                # only bites when the root logger has no handlers yet (the
+                # CLI installs some first), so normalise rather than rely on
+                # call order.
+                log_level=log_level.upper(),
                 elevate_permissions=datalab.elevate_permissions,
             )
         finally:

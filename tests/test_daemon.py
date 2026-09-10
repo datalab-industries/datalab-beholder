@@ -995,3 +995,49 @@ class TestMultiDatalabRouting:
             "https://north.example.org",
             "https://south.example.org",
         ]
+
+
+class TestHeartbeatIntegration:
+    """The daemon must publish its claim, or a GUI cannot tell it apart from
+    a dead one."""
+
+    def test_setup_and_tick_publish_a_heartbeat(self, sample_config, monkeypatch):
+        from datalab_beholder.daemon import BeholderDaemon
+
+        monkeypatch.setattr(
+            BeholderDaemon,
+            "_build_clients",
+            staticmethod(lambda config: {d.name: object() for d in config.datalabs}),
+        )
+        daemon = BeholderDaemon(sample_config)
+        daemon.setup()
+
+        hb = daemon._state.get_heartbeat()
+        assert hb is not None and hb.is_this_process()
+
+        daemon.tick()
+        assert daemon._state.get_heartbeat().last_tick >= hb.last_tick
+
+        daemon.shutdown()
+        # A clean shutdown releases the claim immediately rather than making
+        # observers wait out the staleness timeout.
+        assert daemon._state.get_heartbeat() is None
+
+    def test_heartbeat_failure_does_not_break_tick(self, sample_config, monkeypatch):
+        """Heartbeats are for observers only — a failure must never take the
+        sync loop down."""
+        from datalab_beholder.daemon import BeholderDaemon
+
+        monkeypatch.setattr(
+            BeholderDaemon,
+            "_build_clients",
+            staticmethod(lambda config: {d.name: object() for d in config.datalabs}),
+        )
+        daemon = BeholderDaemon(sample_config)
+        daemon.setup()
+
+        def boom(*a, **k):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr(daemon._state, "beat", boom)
+        daemon.tick()  # must not raise

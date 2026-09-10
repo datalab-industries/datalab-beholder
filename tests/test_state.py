@@ -563,3 +563,172 @@ class TestIdsRoundTrip:
         pending = store.get_pending_changes("wp")
         assert pending[0].ids == {}
         store.close()
+
+
+class TestHeartbeat:
+    """The heartbeat is what lets an observer distinguish 'no daemon' from
+    'somebody else is doing the work'."""
+
+    def test_beat_roundtrip(self, tmp_path):
+        from datalab_beholder.state import StateStore
+
+        store = StateStore(tmp_path / "s.db")
+        assert store.get_heartbeat() is None
+
+        store.beat("rig-1", "idle")
+        hb = store.get_heartbeat()
+        assert hb is not None
+        assert hb.daemon_id == "rig-1"
+        assert hb.status == "idle"
+        assert hb.is_this_process()
+        assert not hb.is_stale()
+        store.close()
+
+    def test_beat_is_single_row(self, tmp_path):
+        """Repeated beats update in place rather than accumulating rows."""
+        from datalab_beholder.state import StateStore
+
+        store = StateStore(tmp_path / "s.db")
+        store.beat("rig-1", "idle")
+        store.beat("rig-1", "attaching")
+        rows = store._conn.execute(
+            "SELECT COUNT(*) AS n FROM daemon_heartbeat"
+        ).fetchone()
+        assert rows["n"] == 1
+        assert store.get_heartbeat().status == "attaching"
+        store.close()
+
+    def test_clear_heartbeat(self, tmp_path):
+        from datalab_beholder.state import StateStore
+
+        store = StateStore(tmp_path / "s.db")
+        store.beat("rig-1", "idle")
+        store.clear_heartbeat()
+        assert store.get_heartbeat() is None
+        store.close()
+
+    def test_stale_detection(self, tmp_path):
+        """A crashed daemon never clears its heartbeat, so age is what
+        decides whether a claim still counts."""
+        import time as _time
+
+        from datalab_beholder.state import Heartbeat
+
+        hb = Heartbeat(
+            pid=1,
+            hostname="nowhere",
+            daemon_id="d",
+            started_at=0.0,
+            last_tick=_time.time() - 120,
+            status="idle",
+        )
+        assert hb.is_stale(timeout=30)
+        assert not hb.is_stale(timeout=600)
+        assert not hb.is_this_process()
+
+    def test_heartbeat_readable_read_only(self, tmp_path):
+        from datalab_beholder.state import StateStore
+
+        db = tmp_path / "s.db"
+        writer = StateStore(db)
+        writer.beat("rig-1", "attaching")
+        writer.close()
+
+        reader = StateStore(db, read_only=True)
+        hb = reader.get_heartbeat()
+        assert hb is not None and hb.status == "attaching"
+        reader.close()
+
+    def test_missing_heartbeat_table_is_tolerated(self, tmp_path):
+        """A state DB written by a beholder that predates heartbeats must
+        still be observable rather than raising."""
+        import sqlite3
+
+        from datalab_beholder.state import StateStore
+
+        db = tmp_path / "old.db"
+        store = StateStore(db)
+        store.close()
+        conn = sqlite3.connect(db)
+        conn.execute("DROP TABLE daemon_heartbeat")
+        conn.commit()
+        conn.close()
+
+        reader = StateStore(db, read_only=True)
+        assert reader.get_heartbeat() is None
+        reader.close()
+
+
+class TestObserverSummaries:
+    def test_path_summary_counts_by_status(self, tmp_path, tmp_tree):
+        from datalab_beholder.scanner import scan_directory
+        from datalab_beholder.state import StateStore
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        scan = scan_directory(
+            tmp_tree, name="wp", include_patterns=["*"], exclude_patterns=[]
+        )
+        store.update_from_scan(scan)
+
+        summary = store.path_summary("wp")
+        assert summary.total > 0
+        assert summary.pending == summary.total  # nothing synced yet
+        assert summary.synced == 0
+        assert summary.last_synced is None
+
+        first = sorted(e.path for e in scan.entries if not e.is_directory)[0]
+        store.mark_synced("wp", [first])
+
+        summary = store.path_summary("wp")
+        assert summary.synced == 1
+        assert summary.pending == summary.total - 1
+        assert summary.last_synced is not None
+        store.close()
+
+    def test_summarise_covers_every_registered_path(self, tmp_path):
+        from datalab_beholder.state import StateStore
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("b")
+        store.register_watched_path("a")
+        assert [s.name for s in store.summarise()] == ["a", "b"]
+        store.close()
+
+    def test_recent_files_newest_first(self, tmp_path, tmp_tree):
+        from datalab_beholder.scanner import scan_directory
+        from datalab_beholder.state import StateStore
+
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        store.update_from_scan(
+            scan_directory(
+                tmp_tree, name="wp", include_patterns=["*"], exclude_patterns=[]
+            )
+        )
+        rows = store.recent_files("wp", limit=3)
+        assert 0 < len(rows) <= 3
+        mtimes = [r["modified"] for r in rows]
+        assert mtimes == sorted(mtimes, reverse=True)
+        assert isinstance(rows[0]["ids"], dict)
+        store.close()
+
+    def test_summaries_work_read_only(self, tmp_path, tmp_tree):
+        """The whole point: an observer never opens the DB for writing."""
+        from datalab_beholder.scanner import scan_directory
+        from datalab_beholder.state import StateStore
+
+        db = tmp_path / "s.db"
+        writer = StateStore(db)
+        writer.register_watched_path("wp")
+        writer.update_from_scan(
+            scan_directory(
+                tmp_tree, name="wp", include_patterns=["*"], exclude_patterns=[]
+            )
+        )
+        writer.close()
+
+        reader = StateStore(db, read_only=True)
+        summaries = reader.summarise()
+        assert len(summaries) == 1 and summaries[0].total > 0
+        reader.close()

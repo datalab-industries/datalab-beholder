@@ -35,11 +35,12 @@ class BeholderClient(DatalabClient):
     last_request_ok: bool = False
 
     def check_connection(self) -> tuple[bool, bool]:
-        """Probe the server with a lightweight ``GET /info``.
+        """Probe the server with ``GET /info``, then verify the API key.
 
-        Auth is reported as configured when a non-placeholder API key is
-        present in the request headers. Once datalab grows a proper
-        ``/whoami``-style endpoint, this can be tightened.
+        Auth is confirmed against ``/get-current-user`` rather than merely
+        checking that a key is present: a stale or mistyped key otherwise
+        reports as "authenticated" right up until every upload 401s, which
+        is precisely the failure the status display exists to catch.
 
         Returns:
             ``(reachable, authenticated)``.
@@ -54,7 +55,12 @@ class BeholderClient(DatalabClient):
 
         if reachable:
             key = self._headers.get("DATALAB-API-KEY", "")
-            authenticated = bool(key) and key != "your-api-key-here"
+            if key and key != "your-api-key-here":
+                try:
+                    authenticated = bool(self.authenticate())
+                except Exception as e:
+                    log.debug("Authentication check failed: %s", e)
+                    authenticated = False
 
         self.last_request_ok = reachable
         return reachable, authenticated

@@ -163,11 +163,44 @@ datalab-beholder status [--config PATH]
 
 ### `datalab-beholder gui`
 
-Launches a small Tkinter status GUI showing connection state per configured *datalab*, recent activity, and a settings editor for the YAML config. Driven by the same `tick()` loop as the CLI daemon.
+Launches a Tkinter control panel: connection state per configured *datalab*, a
+live per-path sync table, an activity log, and a settings editor covering every
+field in the config file.
 
 ```
-datalab-beholder gui [--config PATH]
+datalab-beholder gui [--config PATH] [--autostart] [--minimized]
 ```
+
+**The window always monitors the state database, read-only.** That means it
+reports on whichever daemon is doing the work — one started here with
+"Start", a separate `datalab-beholder start`, or a service launched at boot —
+by reading the heartbeat the daemon writes on every tick. If another daemon
+already owns the state database, "Start" is disabled and the window simply
+follows along, so two processes can never fight over the same state.
+
+For launch-at-login, `--autostart --minimized` starts syncing immediately and
+stays out of the way; if a daemon is already running it monitors that one
+instead of starting a second.
+
+The **Settings** dialog is tabbed:
+
+| Tab | Covers |
+|---|---|
+| datalab instances | `name`, `url`, `api_key`, `elevate_permissions` |
+| Watched paths | one row per path; "Edit…" opens the full editor |
+| Daemon | `sync.metadata_interval`, `state_db`, `log_level`, `reset_scan_clocks_on_startup` |
+
+The per-path editor exposes the whole watched-path schema — `kind`, location
+(`path`, or `host` for ssh / `provider` for cloud), `datalab`,
+`include_patterns`, `exclude_patterns`, `max_depth`, `id_patterns`,
+`item_type`, `item_id_template`, `collection_id_template`, `block_patterns`,
+and the three-tier `scan` cadence (`hot_interval`, `warm_interval`,
+`cold_interval`, `hot_window`). Edits are validated against the same pydantic
+models the loader uses, so a bad regex or an unknown capture group is reported
+in the dialog rather than at next startup.
+
+Keys the dialog doesn't model are round-tripped untouched, so hand-edited YAML
+and configs written by a newer beholder survive a save.
 
 ## Standalone executable (PyInstaller)
 

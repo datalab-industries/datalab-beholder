@@ -293,8 +293,33 @@ def dry_run(config_path: Path | None, log_level: str | None) -> None:
     default=None,
     help="Override log level from config.",
 )
-def gui(config_path: Path | None, log_level: str | None) -> None:
-    """Launch the beholder GUI."""
+@click.option(
+    "--autostart",
+    is_flag=True,
+    default=False,
+    help="Start syncing immediately, unless another daemon already owns the state DB.",
+)
+@click.option(
+    "--minimized",
+    is_flag=True,
+    default=False,
+    help="Start with the window minimized, for launch-at-login.",
+)
+def gui(
+    config_path: Path | None,
+    log_level: str | None,
+    autostart: bool,
+    minimized: bool,
+) -> None:
+    """Launch the beholder GUI.
+
+    The window always monitors the configured state database, so it reports
+    on a daemon running anywhere on this machine — including one started by
+    a service manager at boot. ``--autostart --minimized`` is the
+    launch-at-login combination: it starts syncing straight away and stays
+    out of the way, unless another daemon already owns the state database,
+    in which case it just monitors that one.
+    """
     try:
         from datalab_beholder.gui import BeholderGUI
     except ImportError:
@@ -307,7 +332,7 @@ def gui(config_path: Path | None, log_level: str | None) -> None:
 
     _setup_logging(log_level or "INFO")
 
-    app = BeholderGUI(config_path)
+    app = BeholderGUI(config_path, autostart=autostart, minimized=minimized)
     app.mainloop()
 
 

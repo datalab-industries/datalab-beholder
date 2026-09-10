@@ -11,12 +11,28 @@ class TestBeholderClient:
     def test_check_connection_reachable_and_authed(
         self, mock_transport, monkeypatch
     ) -> None:
+        # get_info is stubbed to succeed and the key looks real, so auth now
+        # turns on whether /get-current-user accepts it.
+        mock_transport.add_response(
+            "GET", "/get-current-user", json_data={"display_name": "test"}
+        )
         client = _make_beholder_client(mock_transport, monkeypatch)
-        # _make_beholder_client monkeypatches get_info to succeed and sets a
-        # real-looking key, so both flags should come back True.
         reachable, authed = client.check_connection()
         assert reachable is True
         assert authed is True
+
+    def test_check_connection_rejects_a_bad_key(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        """A stale key must not report as authenticated just because it is
+        present — that is the failure the status display exists to catch."""
+        mock_transport.add_response(
+            "GET", "/get-current-user", status_code=401, json_data={"error": "nope"}
+        )
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        reachable, authed = client.check_connection()
+        assert reachable is True
+        assert authed is False
 
     def test_check_connection_unreachable(self, mock_transport, monkeypatch) -> None:
         client = _make_beholder_client(mock_transport, monkeypatch)
