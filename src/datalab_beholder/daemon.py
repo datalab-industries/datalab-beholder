@@ -28,6 +28,139 @@ def _match_block_type(filename: str, block_patterns: dict[str, str]) -> str | No
     return None
 
 
+# Block modes that keep a single block of each type per item, rather
+# than one block per attached file.
+_SINGLE_BLOCK_MODES = ("per_item", "per_item_all_files")
+
+
+def _find_existing_block(
+    client: BeholderClient,
+    item: dict[str, Any],
+    block_type: str,
+    file_id: str,
+    block_mode: str,
+) -> str | None:
+    """Return the id of a block that makes creating a new one redundant.
+
+    Under ``per_file`` (the default) only a block already wired to
+    ``file_id`` counts; under the single-block modes any block of
+    ``block_type`` on the item does.
+    """
+    if block_mode in _SINGLE_BLOCK_MODES:
+        return client.find_block_of_type(item, block_type)
+    return client.find_block_for_file(item, block_type, file_id)
+
+
+def _record_block(
+    item: dict[str, Any], block_id: str, block_type: str, file_ids: list[str]
+) -> None:
+    """Note a just-created or just-updated block on the cached ``item``
+    snapshot.
+
+    The snapshot is re-used for every file on the same item within a
+    pass, so without this a single-block path would create one block
+    per file on the first pass and only settle down on the next one.
+    """
+    blocks = item.setdefault("blocks_obj", {})
+    block = blocks.setdefault(block_id, {})
+    block["blocktype"] = block_type
+    block.pop("file_id", None)
+    block.pop("file_ids", None)
+    if len(file_ids) > 1:
+        block["file_ids"] = list(file_ids)
+    else:
+        block["file_id"] = file_ids[0]
+
+
+def _block_has_file(
+    client: BeholderClient,
+    item: dict[str, Any] | None,
+    block_id: str | None,
+    file_id: str | None,
+) -> bool:
+    """Whether ``block_id`` on ``item`` is already wired to ``file_id``.
+
+    Dry-run helper: a file that is not yet attached (no ``file_id``) or
+    a block that was only planned, never fetched, can't be wired.
+    """
+    if item is None or block_id is None or file_id is None:
+        return False
+    block = (item.get("blocks_obj") or {}).get(block_id) or {}
+    return file_id in client.block_file_ids(block)
+
+
+def _ensure_block(
+    client: BeholderClient,
+    item: dict[str, Any],
+    item_id: str,
+    block_type: str,
+    file_id: str,
+    block_mode: str,
+    rel_path: str,
+) -> None:
+    """Make sure ``file_id`` is represented by a block of ``block_type``
+    on ``item``, according to ``block_mode``.
+
+    Creates a block when none applies. Under ``per_item_all_files`` an
+    applicable block that doesn't yet know about this file is updated
+    to carry it alongside the ones already wired in.
+    """
+    existing_id = _find_existing_block(client, item, block_type, file_id, block_mode)
+
+    if existing_id is None:
+        created = client.create_block(
+            item_id=item_id, block_type=block_type, file_id=file_id
+        )
+        if created is None:
+            return
+        block_id = created.get("block_id")
+        if block_id:
+            _record_block(item, str(block_id), block_type, [file_id])
+        else:
+            # No id in the reply: remember the block under a synthetic
+            # key so this pass doesn't create a second one. It can't be
+            # updated in place until the next pass re-fetches the item.
+            _record_block(item, f"beholder-new-{file_id}", block_type, [file_id])
+        log.info("Created %s block on item %s for %s", block_type, item_id, rel_path)
+        return
+
+    if block_mode != "per_item_all_files":
+        return
+
+    block = (item.get("blocks_obj") or {}).get(existing_id) or {}
+    file_ids = client.block_file_ids(block)
+    if file_id in file_ids:
+        return
+    if existing_id.startswith("beholder-new-"):
+        log.warning(
+            "Cannot wire %s into the %s block just created on item %s "
+            "(the server didn't return its id); it will be picked up on "
+            "a later pass",
+            rel_path,
+            block_type,
+            item_id,
+        )
+        return
+
+    file_ids.append(file_id)
+    updated = client.update_block_files(
+        item_id=item_id,
+        block_id=existing_id,
+        block_type=block_type,
+        block=block,
+        file_ids=file_ids,
+    )
+    if updated is not None:
+        _record_block(item, existing_id, block_type, file_ids)
+        log.info(
+            "Wired %s into %s block %s on item %s",
+            rel_path,
+            block_type,
+            existing_id,
+            item_id,
+        )
+
+
 class BeholderDaemon:
     """Daemon that scans watched paths on layered cadences and attaches
     files whose path matched an ``id_pattern`` to their datalab item.
@@ -311,11 +444,15 @@ class BeholderDaemon:
            with the same basename. If found, upload with
            ``replace_file_id`` to overwrite in place; otherwise upload
            as a new attachment.
-        4. If the file matched a ``block_patterns`` entry and the item
-           doesn't already have a block of that type wired to this
-           exact file (matched via the block's own ``file_id``, since
-           the file's own record isn't reliably kept in sync), create
-           one wired to the newly-uploaded file.
+        4. If the file matched a ``block_patterns`` entry, create a
+           block wired to the newly-uploaded file unless one already
+           exists. What counts as "already exists" depends on the
+           path's ``block_mode``: under ``per_file`` (the default) only
+           a block wired to this exact file (matched via the block's
+           own ``file_id``, since the file's own record isn't reliably
+           kept in sync); under ``per_item`` and ``per_item_all_files``
+           any block of that type on the item — and the latter also
+           updates that block to carry this file too.
         5. Mark successful uploads synced. A ``304`` reply (the server
            already holds identical content, matched by hash) counts as
            success, so an unchanged-but-retouched file isn't re-uploaded
@@ -402,24 +539,16 @@ class BeholderDaemon:
 
                     block_type = _match_block_type(file_path.name, wp.block_patterns)
                     file_id = result.get("file_id")
-                    if (
-                        block_type
-                        and file_id
-                        and client.find_block_for_file(item, block_type, file_id)
-                        is None
-                    ):
-                        block = client.create_block(
-                            item_id=item_id,
-                            block_type=block_type,
-                            file_id=file_id,
+                    if block_type and file_id:
+                        _ensure_block(
+                            client,
+                            item,
+                            item_id,
+                            block_type,
+                            str(file_id),
+                            wp.block_mode,
+                            entry.path,
                         )
-                        if block is not None:
-                            log.info(
-                                "Created %s block on item %s for %s",
-                                block_type,
-                                item_id,
-                                entry.path,
-                            )
 
             if synced:
                 self._state.mark_synced(wp.name, synced)
@@ -436,7 +565,9 @@ class PlannedAction:
     """One thing the daemon would have done, as reported by `dry_run`."""
 
     watched_path: str
-    action: str  # "create_item" | "upload" | "replace" | "create_block" | "skip"
+    # "create_item" | "upload" | "replace" | "create_block" |
+    # "update_block" | "skip" | "attach_unknown"
+    action: str
     item_id: str
     path: str = ""
     detail: str = ""
@@ -608,6 +739,7 @@ def dry_run(
 
             item_cache: dict[str, dict[str, Any] | None] = {}
             would_create: set[str] = set()
+            planned_blocks: set[tuple[str, str]] = set()
 
             for entry in attachable:
                 item_id = entry.ids["item_id"]
@@ -684,30 +816,37 @@ def dry_run(
 
                 block_type = _match_block_type(filename, wp.block_patterns)
                 if block_type:
-                    # A block can only already exist for a file that is
-                    # already attached (i.e. the replace case); a new
-                    # upload gets a fresh file_id, so the daemon would
-                    # always create a block for it.
-                    has_block = (
-                        item is not None
-                        and replace_id is not None
-                        and client.find_block_for_file(item, block_type, replace_id)
-                        is not None
+                    existing_block_id: str | None = None
+                    if item is not None:
+                        if wp.block_mode in _SINGLE_BLOCK_MODES:
+                            # One block of each type per item, so any
+                            # existing block of that type counts.
+                            existing_block_id = client.find_block_of_type(
+                                item, block_type
+                            )
+                        elif replace_id is not None:
+                            # A block can only already exist for a file
+                            # that is already attached (i.e. the replace
+                            # case); a new upload gets a fresh file_id,
+                            # so the daemon would always create a block.
+                            existing_block_id = client.find_block_for_file(
+                                item, block_type, replace_id
+                            )
+                    # A block this run has already planned counts too,
+                    # but only where one block serves the whole item.
+                    planned = (
+                        wp.block_mode in _SINGLE_BLOCK_MODES
+                        and (item_id, block_type) in planned_blocks
                     )
-                    if has_block:
-                        log.debug(
-                            "item %s already has a %s block for %s",
-                            item_id,
-                            block_type,
-                            entry.path,
-                        )
-                    else:
+
+                    if existing_block_id is None and not planned:
                         log.info(
                             "would create %s block on item %s for %s",
                             block_type,
                             item_id,
                             entry.path,
                         )
+                        planned_blocks.add((item_id, block_type))
                         actions.append(
                             PlannedAction(
                                 wp.name,
@@ -716,6 +855,31 @@ def dry_run(
                                 entry.path,
                                 detail=block_type,
                             )
+                        )
+                    elif wp.block_mode == "per_item_all_files" and not _block_has_file(
+                        client, item, existing_block_id, replace_id
+                    ):
+                        log.info(
+                            "would wire %s into the %s block on item %s",
+                            entry.path,
+                            block_type,
+                            item_id,
+                        )
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "update_block",
+                                item_id,
+                                entry.path,
+                                detail=block_type,
+                            )
+                        )
+                    else:
+                        log.debug(
+                            "item %s already has a %s block for %s",
+                            item_id,
+                            block_type,
+                            entry.path,
                         )
     finally:
         if state is not None:
