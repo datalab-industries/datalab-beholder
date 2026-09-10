@@ -257,6 +257,7 @@ def dry_run(config_path: Path | None, log_level: str | None) -> None:
         "upload": "upload {n} new file(s)",
         "replace": "replace {n} existing file(s)",
         "create_block": "create {n} data block(s)",
+        "update_block": "wire {n} file(s) into an existing data block",
         "skip": "skip {n} file(s) whose item is missing and not creatable",
         "attach_unknown": (
             "attach {n} file(s) — datalab unreachable, cannot tell create from replace"

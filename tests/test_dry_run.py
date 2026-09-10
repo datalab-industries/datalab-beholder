@@ -124,6 +124,157 @@ class TestDryRun:
         assert {a.item_id for a in _actions_of(actions, "create_block")} == {"file3"}
         assert {a.item_id for a in _actions_of(actions, "create_item")} == {"file3"}
 
+    def test_per_file_block_mode_plans_a_block_per_file(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Both csvs map to the same item; the default per_file mode plans
+        one block for each of them."""
+        transport = MockTransport()
+        config = _make_config(
+            tmp_path,
+            tmp_tree,
+            id_patterns=[r"(?P<item_id>file)[0-9]+\.csv$"],
+        )
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        blocks = _actions_of(actions, "create_block")
+        assert {a.path for a in blocks} == {"file1.csv", "subdir/file3.csv"}
+
+    def test_per_item_block_mode_plans_one_block_per_item(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Same two files under ``block_mode: per_item`` — only the first
+        one gets a block planned."""
+        transport = MockTransport()
+        config = _make_config(
+            tmp_path,
+            tmp_tree,
+            id_patterns=[r"(?P<item_id>file)[0-9]+\.csv$"],
+            block_mode="per_item",
+        )
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        assert len(_actions_of(actions, "upload")) == 2
+        blocks = _actions_of(actions, "create_block")
+        assert [(a.item_id, a.detail) for a in blocks] == [("file", "tabular")]
+
+    def test_per_item_block_mode_skips_when_item_has_block_for_other_file(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """An existing block of the type on the item suppresses the plan,
+        even though it is wired to an unrelated file."""
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/file1",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "file1",
+                    "files": [],
+                    "blocks_obj": {"b1": {"blocktype": "tabular", "file_id": "other"}},
+                    "display_order": ["b1"],
+                }
+            },
+        )
+        config = _make_config(tmp_path, tmp_tree, block_mode="per_item")
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        # file1 is uploaded as a new file but reuses the existing block;
+        # file3's item doesn't exist, so it still gets one.
+        assert {a.item_id for a in _actions_of(actions, "create_block")} == {"file3"}
+
+    def test_per_item_all_files_plans_one_block_and_an_update(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Two files on one item: the first would get the block, the
+        second would be wired into it."""
+        transport = MockTransport()
+        config = _make_config(
+            tmp_path,
+            tmp_tree,
+            id_patterns=[r"(?P<item_id>file)[0-9]+\.csv$"],
+            block_mode="per_item_all_files",
+        )
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        assert len(_actions_of(actions, "create_block")) == 1
+        updates = _actions_of(actions, "update_block")
+        assert [(a.item_id, a.detail) for a in updates] == [("file", "tabular")]
+
+    def test_per_item_all_files_plans_update_for_existing_block(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """The item already has a block of the type, wired to another
+        file — this file would be added to it, not given its own."""
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/file1",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "file1",
+                    "files": [],
+                    "blocks_obj": {"b1": {"blocktype": "tabular", "file_id": "other"}},
+                    "display_order": ["b1"],
+                }
+            },
+        )
+        config = _make_config(tmp_path, tmp_tree, block_mode="per_item_all_files")
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        assert {a.item_id for a in _actions_of(actions, "update_block")} == {"file1"}
+        assert {a.item_id for a in _actions_of(actions, "create_block")} == {"file3"}
+
+    def test_per_item_all_files_quiet_when_file_already_in_block(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """A re-attached file that the block already lists needs neither a
+        new block nor an update."""
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/file1",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "file1",
+                    "files": [
+                        {
+                            "name": "file1.csv",
+                            "original_name": "file1.csv",
+                            "immutable_id": "abc",
+                        }
+                    ],
+                    "blocks_obj": {
+                        "b1": {"blocktype": "tabular", "file_ids": ["abc", "other"]}
+                    },
+                    "display_order": ["b1"],
+                }
+            },
+        )
+        config = _make_config(tmp_path, tmp_tree, block_mode="per_item_all_files")
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        assert _actions_of(actions, "replace")
+        assert not [
+            a for a in _actions_of(actions, "update_block") if a.item_id == "file1"
+        ]
+        assert {a.item_id for a in _actions_of(actions, "create_block")} == {"file3"}
+
     def test_synced_state_reports_nothing_pending(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:

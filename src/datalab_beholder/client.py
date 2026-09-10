@@ -157,6 +157,76 @@ class BeholderClient(DatalabClient):
                 return block_id
         return None
 
+    def find_block_of_type(self, item: dict[str, Any], block_type: str) -> str | None:
+        """Return the id of any existing ``block_type`` block on ``item``,
+        regardless of which file it is wired to, or ``None``.
+
+        Used by watched paths configured with ``block_mode: per_item``,
+        where a single block of each type is enough however many files
+        end up attached.
+        """
+        for block_id, block in (item.get("blocks_obj") or {}).items():
+            if block.get("blocktype") == block_type:
+                return block_id
+        return None
+
+    def block_file_ids(self, block: dict[str, Any]) -> list[str]:
+        """Return the file ids wired to ``block``.
+
+        A block carries a single ``file_id`` or a ``file_ids`` list
+        depending on how many files it was last updated with, so both
+        have to be considered. (An instance method, not a static one:
+        the base class's metaclass rewraps public methods and expects
+        ``self``.)
+        """
+        raw = block.get("file_ids") or []
+        if isinstance(raw, str):
+            raw = [raw]
+        file_ids = [str(f) for f in raw]
+        single = block.get("file_id")
+        if single and str(single) not in file_ids:
+            file_ids.append(str(single))
+        return file_ids
+
+    def update_block_files(
+        self,
+        item_id: str,
+        block_id: str,
+        block_type: str,
+        block: dict[str, Any],
+        file_ids: list[str],
+    ) -> dict[str, Any] | None:
+        """Rewrite the file list of the existing block ``block_id``.
+
+        ``block`` is the block's current data (from the item's
+        ``blocks_obj``); its own file fields are dropped and replaced by
+        ``file_ids``, matching how ``datalab_api`` shapes the payload —
+        a lone id goes in ``file_id``, several in ``file_ids``. Errors
+        are logged and swallowed so the daemon loop survives a single
+        bad block.
+        """
+        payload = {k: v for k, v in block.items() if k not in ("file_id", "file_ids")}
+        if len(file_ids) > 1:
+            payload["file_ids"] = list(file_ids)
+        else:
+            payload["file_id"] = file_ids[0]
+        try:
+            return super().update_data_block(
+                item_id=item_id,
+                block_id=block_id,
+                block_type=block_type,
+                block_data=payload,
+            )
+        except DatalabAPIError as e:
+            log.error(
+                "Failed to update %s block %s on item %s: %s",
+                block_type,
+                block_id,
+                item_id,
+                e,
+            )
+            return None
+
     def create_block(
         self, item_id: str, block_type: str, file_id: str
     ) -> dict[str, Any] | None:

@@ -390,6 +390,24 @@ class TestBlockPatterns:
             )
 
 
+class TestBlockMode:
+    def test_defaults_to_per_file(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(path=tmp_path, name="wp")
+        assert wp.block_mode == "per_file"
+
+    def test_accepts_per_item(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(path=tmp_path, name="wp", block_mode="per_item")
+        assert wp.block_mode == "per_item"
+
+    def test_accepts_per_item_all_files(self, tmp_path: Path) -> None:
+        wp = LocalWatchedPath(path=tmp_path, name="wp", block_mode="per_item_all_files")
+        assert wp.block_mode == "per_item_all_files"
+
+    def test_unknown_mode_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError):
+            LocalWatchedPath(path=tmp_path, name="wp", block_mode="per_everything")
+
+
 class TestScanCadence:
     def test_defaults_present(self, tmp_path: Path) -> None:
         wp = LocalWatchedPath(path=tmp_path, name="wp")
