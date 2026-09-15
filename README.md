@@ -87,6 +87,16 @@ Example: `id_patterns: ["^(?P<group_id>P[0-9]+)/(?P<item_id>[0-9]+)-.*\\.mpr$"]`
 
 If a template references a capture group the regex didn't produce, the file is skipped with a warning rather than crashing the attach pass.
 
+#### Changing `id_patterns` or templates
+
+The state DB records each watched path's `id_patterns`, `item_id_template` and `collection_id_template`. If any of them differ on the next start, the daemon logs a warning and discards that path's local state (other watched paths are untouched), then rescans from scratch:
+
+- every matching file is re-attached under its new ids; a file that ends up on the same item under the same name is a no-op on the server, but its content is still sent once,
+- files that now map to a different item are attached there, and their old attachments are left in place (beholder never deletes anything on the server),
+- files that no longer match any pattern simply stop being tracked.
+
+Run `datalab-beholder dry-run` after editing the patterns to preview exactly what the reset will do; `status` also flags a pending reset.
+
 ### Running
 
 `start` is the default command, so the bare invocation runs the daemon:
