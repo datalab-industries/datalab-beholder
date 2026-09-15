@@ -95,6 +95,49 @@ class TestWarmScan:
         # File1 is in the (unchanged) root dir, so warm doesn't see the rewrite.
         assert "file1.csv" not in {e.path for e in diff.modified}
 
+    def test_warm_scan_root_change_does_not_delete_subdir_files(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        """#51: a new top-level file re-scans the root, but files in
+        short-circuited subdirectories were never looked at and must not
+        be marked deleted."""
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", tmp_tree)
+        wp.cold_scan(store)
+
+        for d in (tmp_tree / "subdir", tmp_tree / "subdir" / "deep"):
+            _bump_mtime(d, -30 * 86400)
+        (tmp_tree / "new.csv").write_text("y")
+        _bump_mtime(tmp_tree, 10)
+
+        diff = wp.warm_scan(store)
+        assert "new.csv" in {e.path for e in diff.new}
+        assert diff.deleted == []
+
+    def test_warm_scan_deletion_only_within_scanned_dir(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        """A rescanned `subdir` detects deletions directly inside it, but
+        not in `subdir/deep/`, which was short-circuited."""
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        wp = _make("wp", tmp_tree)
+        wp.cold_scan(store)
+
+        # A tracked file that no longer exists, inside the quiet deep/.
+        store._conn.execute(
+            "INSERT INTO files__wp (path, size, modified, last_seen, status, ids_json)"
+            " VALUES ('subdir/deep/ghost.dat', 1, 0, 0, 'synced', '{}')"
+        )
+        store._conn.commit()
+        (tmp_tree / "subdir" / "file3.csv").unlink()
+        _bump_mtime(tmp_tree / "subdir", 10)
+        _bump_mtime(tmp_tree / "subdir" / "deep", -30 * 86400)
+
+        diff = wp.warm_scan(store)
+        assert {e.path for e in diff.deleted} == {"subdir/file3.csv"}
+
 
 class TestHotScan:
     def test_hot_scan_picks_up_recent_modification(

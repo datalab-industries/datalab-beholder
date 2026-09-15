@@ -42,18 +42,24 @@ _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
 def _in_scope_filter(changed_dirs: list[str]):
-    """Build a predicate `path -> bool` that returns True if `path` is
-    inside any of the directories in `changed_dirs`.
+    """Build a predicate `path -> bool` that returns True if `path`'s
+    immediate parent directory is one of `changed_dirs`.
 
-    Empty string in `changed_dirs` means the watched-path root itself was
-    rescanned, which scopes the entire tree.
+    A warm scan only enumerates the files of the directories it lists in
+    `changed_dirs` (`""` is the watched-path root), so only files
+    directly inside those can be concluded deleted. Deeper
+    subdirectories were short-circuited on their own mtime and are out
+    of scope even when an ancestor was rescanned. (Files under a
+    subdirectory that was removed outright are therefore left for the
+    cold scan to prune.)
     """
-    if "" in changed_dirs:
-        return lambda _path: True
-    prefixes = tuple(d.rstrip("/") + "/" for d in changed_dirs if d)
-    if not prefixes:
-        return lambda _path: False
-    return lambda path: path.startswith(prefixes)
+    scanned = {d.strip("/") for d in changed_dirs}
+
+    def _in_scope(path: str) -> bool:
+        parent, _, _ = path.rpartition("/")
+        return parent in scanned
+
+    return _in_scope
 
 
 def _sanitise_name(name: str) -> str:
