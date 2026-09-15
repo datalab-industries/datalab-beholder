@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from datalab_beholder.client import BeholderClient
+from datalab_beholder.client import BeholderClient, ItemLookupError
 from datalab_beholder.config import BeholderConfig, LocalWatchedPath
 from datalab_beholder.state import DiffEntry, StateStore
 
@@ -384,15 +384,22 @@ class BeholderDaemon:
             log.info("Attaching %d file(s) for %s", len(attachable), wp.name)
 
             # Per-pass cache: item_id → item dict (or None if the item
-            # couldn't be ensured). Avoids re-querying for each file on
-            # the same item.
+            # doesn't exist and couldn't be created). Avoids re-querying
+            # for each file on the same item.
             item_cache: dict[str, dict[str, Any] | None] = {}
+            # Items whose lookup failed this pass (server down, auth
+            # error, ...): their existence is unknown, so their files are
+            # left pending for the next pass rather than skipped as
+            # "missing".
+            unknown_items: set[str] = set()
 
             synced: list[str] = []
             try:
                 for entry in attachable:
                     try:
-                        self._attach_entry(wp, client, entry, item_cache, synced)
+                        self._attach_entry(
+                            wp, client, entry, item_cache, unknown_items, synced
+                        )
                     except Exception:
                         # One bad file must not abort the pass: the rest
                         # still get attached, and whatever already
@@ -413,6 +420,7 @@ class BeholderDaemon:
         client: BeholderClient,
         entry: DiffEntry,
         item_cache: dict[str, dict[str, Any] | None],
+        unknown_items: set[str],
         synced: list[str],
     ) -> None:
         """Attach one pending file (steps 2-4 of ``_attach_matched_files``).
@@ -425,18 +433,27 @@ class BeholderDaemon:
         file_path = wp.path / entry.path
         item_id = entry.ids["item_id"]
 
+        if item_id in unknown_items:
+            log.debug("Skipping %s: item %s lookup failed", entry.path, item_id)
+            return
+
         if item_id not in item_cache:
-            if wp.item_type:
-                item_cache[item_id] = client.ensure_item(
-                    item_id=item_id,
-                    item_type=wp.item_type,
-                    collection_id=entry.ids.get("collection_id"),
-                    group_id=entry.ids.get("group_id"),
-                )
-            else:
-                # No item_type configured → don't create, only
-                # attach if the item already exists.
-                item_cache[item_id] = client.fetch_item(item_id)
+            try:
+                if wp.item_type:
+                    item_cache[item_id] = client.ensure_item(
+                        item_id=item_id,
+                        item_type=wp.item_type,
+                        collection_id=entry.ids.get("collection_id"),
+                        group_id=entry.ids.get("group_id"),
+                    )
+                else:
+                    # No item_type configured → don't create, only
+                    # attach if the item already exists.
+                    item_cache[item_id] = client.fetch_item(item_id)
+            except ItemLookupError as e:
+                log.warning("%s; its files will be retried next pass", e)
+                unknown_items.add(item_id)
+                return
 
         item = item_cache[item_id]
         if item is None:
@@ -695,14 +712,40 @@ def dry_run(
                 continue
 
             item_cache: dict[str, dict[str, Any] | None] = {}
+            unknown_items: set[str] = set()
             would_create: set[str] = set()
 
             for entry in attachable:
                 item_id = entry.ids["item_id"]
                 filename = entry.path.rsplit("/", 1)[-1]
 
+                if item_id in unknown_items:
+                    actions.append(
+                        PlannedAction(
+                            wp.name,
+                            "attach_unknown",
+                            item_id,
+                            entry.path,
+                            "item lookup failed",
+                        )
+                    )
+                    continue
                 if item_id not in item_cache:
-                    item_cache[item_id] = client.fetch_item(item_id)
+                    try:
+                        item_cache[item_id] = client.fetch_item(item_id)
+                    except ItemLookupError as e:
+                        log.error("%s — server state for its files is unknown", e)
+                        unknown_items.add(item_id)
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "attach_unknown",
+                                item_id,
+                                entry.path,
+                                "item lookup failed",
+                            )
+                        )
+                        continue
                 item = item_cache[item_id]
 
                 replace_id: str | None = None

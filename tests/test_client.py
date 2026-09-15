@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
+import pytest
+
+from datalab_beholder.client import ItemLookupError
 from tests.conftest import _make_beholder_client
 
 
@@ -335,6 +339,66 @@ class TestBeholderClient:
             item_id="item-1", block_type="cycle", file_id="file-xyz"
         )
         assert result is None
+
+
+class TestItemLookup:
+    """Only a 404 means "item doesn't exist" (#53)."""
+
+    def test_fetch_item_404_returns_none(self, mock_transport, monkeypatch) -> None:
+        mock_transport.add_response("GET", "/get-item-data/42", status_code=404)
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        assert client.fetch_item("42") is None
+
+    @pytest.mark.parametrize("status", [401, 500, 502, 503, 504])
+    def test_fetch_item_server_error_raises(
+        self, mock_transport, monkeypatch, status: int
+    ) -> None:
+        mock_transport.add_response("GET", "/get-item-data/42", status_code=status)
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        with pytest.raises(ItemLookupError):
+            client.fetch_item("42")
+
+    def test_fetch_item_transport_error_raises(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        def dropped(request):
+            raise httpx.ConnectError("connection dropped", request=request)
+
+        monkeypatch.setattr(mock_transport, "handle_request", dropped)
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        with pytest.raises(ItemLookupError):
+            client.fetch_item("42")
+
+    def test_fetch_item_malformed_response_raises(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        mock_transport.add_response(
+            "GET", "/get-item-data/42", json_data={"item_data": {"item_id": "42"}}
+        )
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        with pytest.raises(ItemLookupError):
+            client.fetch_item("42")
+
+    def test_ensure_item_does_not_create_on_server_error(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        mock_transport.add_response("GET", "/get-item-data/42", status_code=503)
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        with pytest.raises(ItemLookupError):
+            client.ensure_item("42", item_type="cells")
+        assert not any(r.url.path == "/new-sample/" for r in mock_transport.requests)
+
+    def test_ensure_item_duplicate_refetches(self, mock_transport, monkeypatch) -> None:
+        """Item created by someone else between lookup and create."""
+        mock_transport.add_response(
+            "POST", "/new-sample/", status_code=409, json_data={"message": "dup"}
+        )
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        existing = {"item_id": "42", "files": []}
+        lookups = iter([None, existing])
+        monkeypatch.setattr(client, "fetch_item", lambda item_id: next(lookups))
+
+        assert client.ensure_item("42", item_type="cells") == existing
 
 
 class TestElevatedPermissions:
