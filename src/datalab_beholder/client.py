@@ -165,12 +165,18 @@ class BeholderClient(DatalabClient):
         ``file_id`` must already be uploaded and attached to the item.
         Errors are logged and swallowed so the daemon loop survives a
         single bad item or transient hiccup.
+
+        ``create_data_block`` re-fetches the item and raises a bare
+        ``RuntimeError`` if the server doesn't list the new file yet,
+        and ``KeyError`` on an unexpected response shape; both are
+        caught too, since a block is only a convenience on top of an
+        attachment that already succeeded.
         """
         try:
             return super().create_data_block(
                 item_id=item_id, block_type=block_type, file_ids=file_id
             )
-        except DatalabAPIError as e:
+        except (DatalabAPIError, RuntimeError, KeyError) as e:
             log.error(
                 "Failed to create %s block on item %s: %s", block_type, item_id, e
             )

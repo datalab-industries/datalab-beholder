@@ -983,6 +983,84 @@ class TestE2EAttachFlow:
         # A retry happened.
         assert upload_count_after > upload_count_before
 
+    def test_block_failure_after_upload_still_marks_files_synced(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#49: the server not yet listing a just-uploaded file makes
+        block creation raise; the uploads must still count as synced so
+        they aren't re-uploaded every pass."""
+        root = _attach_tree(tmp_path)
+        for name in ("42-cell-b.mpr", "42-cell-c.mpr"):
+            (root / name).write_bytes(b"\x01" * 8)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                    "file_ObjectIds": [],  # uploaded file not listed yet
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        uploads = [r for r in transport.requests if r.url.path == "/upload-file/"]
+        assert len(uploads) == 3
+        assert daemon._state.get_pending_changes("cells") == []
+        assert daemon.sync_status == "idle"
+
+    def test_exception_on_one_file_does_not_abort_pass(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#49: an unexpected exception on one file is logged; the files
+        before and after it are still attached and marked synced."""
+        root = _attach_tree(tmp_path)
+        for name in ("42-cell-b.mpr", "42-cell-c.mpr"):
+            (root / name).write_bytes(b"\x01" * 8)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                }
+            },
+        )
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        client = daemon._clients["test"]
+
+        def flaky_attach(item_id, file_path, replace_file_id=None):
+            if file_path.name == "42-cell-b.mpr":
+                raise ValueError("boom")
+            return {"status": "success", "file_id": f"id-{file_path.name}"}
+
+        monkeypatch.setattr(client, "attach_file", flaky_attach)
+        daemon.setup()
+        daemon.tick()
+
+        pending = daemon._state.get_pending_changes("cells")
+        assert [e.path for e in pending] == ["42-cell-b.mpr"]
+
 
 class TestMultiDatalabRouting:
     def test_clients_by_wp_routes_per_watched_path(

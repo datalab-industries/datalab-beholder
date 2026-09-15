@@ -12,7 +12,7 @@ from typing import Any
 
 from datalab_beholder.client import BeholderClient
 from datalab_beholder.config import BeholderConfig, LocalWatchedPath
-from datalab_beholder.state import StateStore
+from datalab_beholder.state import DiffEntry, StateStore
 
 log = logging.getLogger(__name__)
 
@@ -352,7 +352,8 @@ class BeholderDaemon:
         5. Mark successful uploads synced. A ``304`` reply (the server
            already holds identical content, matched by hash) counts as
            success, so an unchanged-but-retouched file isn't re-uploaded
-           forever. Failures are left un-synced and retried next tick.
+           forever. Failures are left un-synced and retried next tick;
+           an exception on one file is logged and the pass carries on.
 
         File uploads only support local paths today; SSH/Cloud entries
         are skipped with a debug log until those backends grow upload
@@ -388,82 +389,106 @@ class BeholderDaemon:
             item_cache: dict[str, dict[str, Any] | None] = {}
 
             synced: list[str] = []
-            for entry in attachable:
-                file_path = wp.path / entry.path
-                item_id = entry.ids["item_id"]
-
-                if item_id not in item_cache:
-                    if wp.item_type:
-                        item_cache[item_id] = client.ensure_item(
-                            item_id=item_id,
-                            item_type=wp.item_type,
-                            collection_id=entry.ids.get("collection_id"),
-                            group_id=entry.ids.get("group_id"),
-                        )
-                    else:
-                        # No item_type configured → don't create, only
-                        # attach if the item already exists.
-                        item_cache[item_id] = client.fetch_item(item_id)
-
-                item = item_cache[item_id]
-                if item is None:
-                    log.warning(
-                        "Skipping %s: item %s not found and not creatable",
-                        entry.path,
-                        item_id,
-                    )
-                    continue
-
-                replace_id = client.find_existing_file_id(item, file_path.name)
-                result = client.attach_file(
-                    item_id=item_id,
-                    file_path=file_path,
-                    replace_file_id=replace_id,
-                )
-                if result is not None:
-                    synced.append(entry.path)
-                    if result.get("not_modified"):
-                        # Server already holds identical content (it
-                        # compares hashes). Marking it synced anyway is
-                        # the point: otherwise the entry stays pending
-                        # and we re-upload it on every tick.
-                        log.info(
-                            "%s already up to date on item %s",
+            try:
+                for entry in attachable:
+                    try:
+                        self._attach_entry(wp, client, entry, item_cache, synced)
+                    except Exception:
+                        # One bad file must not abort the pass: the rest
+                        # still get attached, and whatever already
+                        # uploaded is still marked synced below.
+                        log.exception(
+                            "Failed to attach %s to item %s; will retry next pass",
                             entry.path,
-                            item_id,
+                            entry.ids["item_id"],
                         )
-                    else:
-                        log.info(
-                            "Attached %s -> item %s%s",
-                            entry.path,
-                            item_id,
-                            f" (replaced file {replace_id})" if replace_id else "",
-                        )
-
-                    block_type = _match_block_type(file_path.name, wp.block_patterns)
-                    file_id = result.get("file_id")
-                    if (
-                        block_type
-                        and file_id
-                        and client.find_block_for_file(item, block_type, file_id)
-                        is None
-                    ):
-                        block = client.create_block(
-                            item_id=item_id,
-                            block_type=block_type,
-                            file_id=file_id,
-                        )
-                        if block is not None:
-                            log.info(
-                                "Created %s block on item %s for %s",
-                                block_type,
-                                item_id,
-                                entry.path,
-                            )
-
-            if synced:
-                self._state.mark_synced(wp.name, synced)
+            finally:
+                if synced:
+                    self._state.mark_synced(wp.name, synced)
             self._state.remove_deleted(wp.name)
+
+    def _attach_entry(
+        self,
+        wp: LocalWatchedPath,
+        client: BeholderClient,
+        entry: DiffEntry,
+        item_cache: dict[str, dict[str, Any] | None],
+        synced: list[str],
+    ) -> None:
+        """Attach one pending file (steps 2-4 of ``_attach_matched_files``).
+
+        Appends ``entry.path`` to ``synced`` as soon as the upload
+        succeeds, *before* any block creation: the bytes being on the
+        server is what matters, and nothing after that should cause a
+        re-upload.
+        """
+        file_path = wp.path / entry.path
+        item_id = entry.ids["item_id"]
+
+        if item_id not in item_cache:
+            if wp.item_type:
+                item_cache[item_id] = client.ensure_item(
+                    item_id=item_id,
+                    item_type=wp.item_type,
+                    collection_id=entry.ids.get("collection_id"),
+                    group_id=entry.ids.get("group_id"),
+                )
+            else:
+                # No item_type configured → don't create, only
+                # attach if the item already exists.
+                item_cache[item_id] = client.fetch_item(item_id)
+
+        item = item_cache[item_id]
+        if item is None:
+            log.warning(
+                "Skipping %s: item %s not found and not creatable",
+                entry.path,
+                item_id,
+            )
+            return
+
+        replace_id = client.find_existing_file_id(item, file_path.name)
+        result = client.attach_file(
+            item_id=item_id,
+            file_path=file_path,
+            replace_file_id=replace_id,
+        )
+        if result is None:
+            return
+
+        synced.append(entry.path)
+        if result.get("not_modified"):
+            # Server already holds identical content (it compares
+            # hashes). Marking it synced anyway is the point: otherwise
+            # the entry stays pending and we re-upload it on every tick.
+            log.info("%s already up to date on item %s", entry.path, item_id)
+        else:
+            log.info(
+                "Attached %s -> item %s%s",
+                entry.path,
+                item_id,
+                f" (replaced file {replace_id})" if replace_id else "",
+            )
+
+        block_type = _match_block_type(file_path.name, wp.block_patterns)
+        file_id = result.get("file_id")
+        if (
+            block_type
+            and file_id
+            and client.find_block_for_file(item, block_type, file_id) is None
+        ):
+            block = client.create_block(
+                item_id=item_id,
+                block_type=block_type,
+                file_id=file_id,
+            )
+            if block is not None:
+                log.info(
+                    "Created %s block on item %s for %s",
+                    block_type,
+                    item_id,
+                    entry.path,
+                )
 
 
 # ----------------------------------------------------------------------
@@ -508,7 +533,7 @@ def dry_run(
     unreachable.
     """
     from datalab_beholder.scanner import scan_directory
-    from datalab_beholder.state import DiffEntry, DiffResult
+    from datalab_beholder.state import DiffResult
 
     if clients is None:
         clients = {}
