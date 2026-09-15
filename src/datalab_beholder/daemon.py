@@ -56,6 +56,7 @@ class BeholderDaemon:
         self._state = StateStore(config.state_db)
         for wp in config.watched_paths:
             self._state.register_watched_path(wp.name)
+            self._reconcile_id_config(wp)
 
         self._clients: dict[str, BeholderClient] = self._build_clients(config)
         # Routing table: each watched path resolves to exactly one client.
@@ -133,6 +134,38 @@ class BeholderDaemon:
     def _build_daemon_id(self) -> str:
         names = sorted(wp.name for wp in self._config.watched_paths)
         return "-".join(names).lower().replace(" ", "-")
+
+    def _reconcile_id_config(self, wp: Any) -> None:
+        """Discard a watched path's state if its id settings changed.
+
+        Files already tracked carry ids captured with the old
+        ``id_patterns``/templates, and there are no guarantees about
+        what happens to them under new ones. Rather than try to
+        reconcile, forget the path's state: the next tick runs a cold
+        scan and everything that matches is re-attached under the new
+        ids. Nothing is removed from the server.
+
+        A DB that has no recorded settings (fresh, or created before
+        they were stored) adopts the current ones without a reset.
+        """
+        current = wp.id_config()
+        stored = self._state.get_id_config(wp.name)
+        if stored == current:
+            return
+        if stored is not None:
+            dropped = self._state.reset_watched_path(wp.name)
+            log.warning(
+                "id settings for %s changed since the last run "
+                "(was %s, now %s): discarded local state for %d tracked "
+                "file(s). A full rescan will run and every matching file "
+                "will be re-attached under the new ids; existing "
+                "attachments on the server are left in place.",
+                wp.name,
+                stored,
+                current,
+                dropped,
+            )
+        self._state.set_id_config(wp.name, current)
 
     def setup(self) -> None:
         """Register signal handlers and initialise loop timers.
@@ -336,6 +369,13 @@ class BeholderDaemon:
                 for e in pending
                 if e.status in ("new", "modified") and e.ids.get("item_id")
             ]
+            if len(attachable) != len(pending):
+                log.debug(
+                    "%s: %d pending entr(ies) have no item_id or are deletions; "
+                    "not attaching them",
+                    wp.name,
+                    len(pending) - len(attachable),
+                )
             if not attachable:
                 continue
 
@@ -436,7 +476,9 @@ class PlannedAction:
     """One thing the daemon would have done, as reported by `dry_run`."""
 
     watched_path: str
-    action: str  # "create_item" | "upload" | "replace" | "create_block" | "skip"
+    # "reset_state" | "create_item" | "upload" | "replace" | "create_block" |
+    # "skip" | "attach_unknown"
+    action: str
     item_id: str
     path: str = ""
     detail: str = ""
@@ -532,7 +574,28 @@ def dry_run(
                 scan.scan_duration_ms,
             )
 
-            if state is not None:
+            stored_id_config = (
+                state.get_id_config(wp.name) if state is not None else None
+            )
+            id_config_changed = (
+                stored_id_config is not None and stored_id_config != wp.id_config()
+            )
+            if id_config_changed:
+                log.warning(
+                    "%s: id settings changed since the last run (was %s, now "
+                    "%s) — the daemon will discard this path's local state on "
+                    "startup; treating every matched file as new",
+                    wp.name,
+                    stored_id_config,
+                    wp.id_config(),
+                )
+                actions.append(
+                    PlannedAction(
+                        wp.name, "reset_state", "", detail="id settings changed"
+                    )
+                )
+
+            if state is not None and not id_config_changed:
                 diff = state.classify_scan(scan)
             else:
                 diff = DiffResult(watched_path_name=wp.name)

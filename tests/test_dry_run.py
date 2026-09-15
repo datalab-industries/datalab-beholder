@@ -154,6 +154,34 @@ class TestDryRun:
         assert actions == []
         assert transport.requests == []
 
+    def test_changed_id_config_reports_reset_and_treats_all_as_new(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Synced state recorded under different id settings would be
+        discarded on startup, so the dry run reports the reset and
+        classifies every matched file as new."""
+        config = _make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        assert isinstance(wp, LocalWatchedPath)
+
+        state = StateStore(config.state_db)
+        state.register_watched_path(wp.name)
+        state.set_id_config(wp.name, '{"id_patterns": ["old"]}')
+        scan = scan_directory(wp.path, name=wp.name, id_patterns=wp.id_patterns)
+        state.update_from_scan(scan)
+        state.mark_synced(wp.name, [e.path for e in scan.entries])
+        state.close()
+
+        transport = MockTransport()
+        clients, _ = _clients(transport, monkeypatch)
+        actions = dry_run(config, clients=clients)
+
+        assert len(_actions_of(actions, "reset_state")) == 1
+        assert {a.path for a in _actions_of(actions, "upload")} == {
+            "file1.csv",
+            "subdir/file3.csv",
+        }
+
     def test_pending_state_still_reported(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
