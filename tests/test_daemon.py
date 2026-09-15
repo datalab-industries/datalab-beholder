@@ -1361,6 +1361,29 @@ class TestE2EAttachFlow:
         pending = daemon._state.get_pending_changes("cells")
         assert [e.path for e in pending] == ["42-cell-b.mpr"]
 
+    def test_item_lookup_server_error_does_not_create_item(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#53: a 503 on the item lookup is not "item missing" — no create
+        attempt, no upload, and the file stays pending for next pass."""
+        root = _attach_tree(tmp_path)
+        (root / "42-cell-b.mpr").write_bytes(b"\x01" * 8)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+        transport.add_response("GET", "/get-item-data/42", status_code=503)
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        paths = [r.url.path for r in transport.requests]
+        assert "/new-sample/" not in paths
+        assert "/upload-file/" not in paths
+        # Looked up once for the item, not once per file.
+        assert paths.count("/get-item-data/42") == 1
+        pending = daemon._state.get_pending_changes("cells")
+        assert {e.path for e in pending} == {"42-cell-formation.mpr", "42-cell-b.mpr"}
+
 
 class TestMultiDatalabRouting:
     def test_clients_by_wp_routes_per_watched_path(
