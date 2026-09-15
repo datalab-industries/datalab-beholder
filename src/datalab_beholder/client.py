@@ -203,7 +203,9 @@ class BeholderClient(DatalabClient):
         ``file_ids``, matching how ``datalab_api`` shapes the payload —
         a lone id goes in ``file_id``, several in ``file_ids``. Errors
         are logged and swallowed so the daemon loop survives a single
-        bad block.
+        bad block — including the ``RuntimeError`` / ``KeyError`` that
+        ``create_block`` also tolerates, since the file this would wire
+        in is already attached either way.
         """
         payload = {k: v for k, v in block.items() if k not in ("file_id", "file_ids")}
         if len(file_ids) > 1:
@@ -217,7 +219,7 @@ class BeholderClient(DatalabClient):
                 block_type=block_type,
                 block_data=payload,
             )
-        except DatalabAPIError as e:
+        except (DatalabAPIError, RuntimeError, KeyError) as e:
             log.error(
                 "Failed to update %s block %s on item %s: %s",
                 block_type,
@@ -235,12 +237,18 @@ class BeholderClient(DatalabClient):
         ``file_id`` must already be uploaded and attached to the item.
         Errors are logged and swallowed so the daemon loop survives a
         single bad item or transient hiccup.
+
+        ``create_data_block`` re-fetches the item and raises a bare
+        ``RuntimeError`` if the server doesn't list the new file yet,
+        and ``KeyError`` on an unexpected response shape; both are
+        caught too, since a block is only a convenience on top of an
+        attachment that already succeeded.
         """
         try:
             return super().create_data_block(
                 item_id=item_id, block_type=block_type, file_ids=file_id
             )
-        except DatalabAPIError as e:
+        except (DatalabAPIError, RuntimeError, KeyError) as e:
             log.error(
                 "Failed to create %s block on item %s: %s", block_type, item_id, e
             )

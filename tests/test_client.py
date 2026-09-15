@@ -387,6 +387,30 @@ class TestBeholderClient:
         )
         assert result is None
 
+    def test_create_block_unlisted_file_returns_none(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        """datalab-api raises a bare RuntimeError when the server doesn't
+        list the just-uploaded file on the item yet (#49). A block is a
+        convenience on top of a successful attach, so swallow it."""
+        mock_transport.add_response(
+            "GET",
+            "/get-item-data/item-1",
+            json_data={
+                "item_data": {
+                    "item_id": "item-1",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "file_ObjectIds": [],
+                }
+            },
+        )
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        result = client.create_block(
+            item_id="item-1", block_type="cycle", file_id="file-xyz"
+        )
+        assert result is None
+
 
 class TestElevatedPermissions:
     """Elevation only touches reads.
