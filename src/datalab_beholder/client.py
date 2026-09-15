@@ -21,12 +21,31 @@ accepted for now; tests monkeypatch those hooks via
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
-from datalab_api import DatalabAPIError, DatalabClient
+from datalab_api import DatalabAPIError, DatalabClient, DuplicateItemError
 
 log = logging.getLogger(__name__)
+
+# `DatalabAPIError` carries no status code; datalab-api only formats it
+# into the message as "HTTP <code> ..." (transport failures carry none).
+_HTTP_STATUS_RE = re.compile(r"\bHTTP (\d{3})\b")
+
+
+class ItemLookupError(Exception):
+    """An item lookup failed for a reason other than "it doesn't exist"
+    (server down, auth failure, dropped connection, unexpected response).
+
+    Distinct from a ``None`` return so callers never mistake an outage
+    for a missing item and try to create a duplicate.
+    """
+
+
+def _http_status(error: DatalabAPIError) -> int | None:
+    match = _HTTP_STATUS_RE.search(str(error))
+    return int(match.group(1)) if match else None
 
 
 class BeholderClient(DatalabClient):
@@ -60,13 +79,27 @@ class BeholderClient(DatalabClient):
         return reachable, authenticated
 
     def fetch_item(self, item_id: str) -> dict[str, Any] | None:
-        """Return the item's data dict, or ``None`` if it doesn't exist
-        (or any other error)."""
+        """Return the item's data dict, or ``None`` if it doesn't exist.
+
+        Only a ``404`` means "doesn't exist". Any other failure (5xx,
+        401/403, a transport error with no status, a malformed
+        response) raises ``ItemLookupError``: the item's server state is
+        unknown, and treating it as missing would trigger a duplicate
+        create attempt.
+        """
         try:
             return super().get_item(item_id=item_id, load_blocks=False)
         except DatalabAPIError as e:
-            log.debug("get_item(%s) failed: %s", item_id, e)
-            return None
+            if _http_status(e) == 404:
+                log.debug("get_item(%s): not found", item_id)
+                return None
+            raise ItemLookupError(f"Could not look up item {item_id}: {e}") from e
+        except (KeyError, TypeError) as e:
+            # `get_item` indexes into the response without checking its
+            # shape.
+            raise ItemLookupError(
+                f"Unexpected response looking up item {item_id}: {e!r}"
+            ) from e
 
     def ensure_item(
         self,
@@ -81,7 +114,8 @@ class BeholderClient(DatalabClient):
         (or creates) the matching collection. ``group_id`` is forwarded
         as a single-element ``group_ids`` list and grants the named
         group access control on the new item. Returns ``None`` if the
-        creation attempt fails.
+        creation attempt fails. Raises ``ItemLookupError`` if the item's
+        existence can't be determined (see ``fetch_item``).
         """
         item = self.fetch_item(item_id)
         if item is not None:
@@ -101,6 +135,10 @@ class BeholderClient(DatalabClient):
                 collection_ids=[collection_id] if collection_id else None,
                 group_ids=[group_id] if group_id else None,
             )
+        except DuplicateItemError:
+            # Created by someone else between our lookup and create.
+            log.info("Item %s appeared concurrently, using it", item_id)
+            return self.fetch_item(item_id)
         except DatalabAPIError as e:
             log.error("Failed to create item %s: %s", item_id, e)
             return None
