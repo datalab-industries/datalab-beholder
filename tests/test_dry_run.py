@@ -154,6 +154,34 @@ class TestDryRun:
         assert actions == []
         assert transport.requests == []
 
+    def test_changed_id_config_reports_reset_and_treats_all_as_new(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """Synced state recorded under different id settings would be
+        discarded on startup, so the dry run reports the reset and
+        classifies every matched file as new."""
+        config = _make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        assert isinstance(wp, LocalWatchedPath)
+
+        state = StateStore(config.state_db)
+        state.register_watched_path(wp.name)
+        state.set_id_config(wp.name, '{"id_patterns": ["old"]}')
+        scan = scan_directory(wp.path, name=wp.name, id_patterns=wp.id_patterns)
+        state.update_from_scan(scan)
+        state.mark_synced(wp.name, [e.path for e in scan.entries])
+        state.close()
+
+        transport = MockTransport()
+        clients, _ = _clients(transport, monkeypatch)
+        actions = dry_run(config, clients=clients)
+
+        assert len(_actions_of(actions, "reset_state")) == 1
+        assert {a.path for a in _actions_of(actions, "upload")} == {
+            "file1.csv",
+            "subdir/file3.csv",
+        }
+
     def test_pending_state_still_reported(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
     ) -> None:
@@ -228,3 +256,20 @@ class TestDryRun:
         assert {a.path for a in skips} == {"file1.csv", "subdir/file3.csv"}
         assert not _actions_of(actions, "create_item")
         assert not _actions_of(actions, "upload")
+
+    def test_item_lookup_error_reports_unknown_not_create(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """#53: a server error on the item lookup means server state is
+        unknown — never report it as "would create"."""
+        transport = MockTransport()
+        transport.add_response("GET", "/get-item-data/file1", status_code=503)
+        config = _make_config(tmp_path, tmp_tree)
+        clients, _ = _clients(transport, monkeypatch)
+
+        actions = dry_run(config, clients=clients)
+
+        unknown = _actions_of(actions, "attach_unknown")
+        assert [a.path for a in unknown] == ["file1.csv"]
+        # file3 still 404s → genuinely missing, would be created.
+        assert {a.item_id for a in _actions_of(actions, "create_item")} == {"file3"}

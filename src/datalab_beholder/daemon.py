@@ -10,9 +10,9 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from datalab_beholder.client import BeholderClient
+from datalab_beholder.client import BeholderClient, ItemLookupError
 from datalab_beholder.config import BeholderConfig, LocalWatchedPath
-from datalab_beholder.state import StateStore
+from datalab_beholder.state import DiffEntry, StateStore
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +56,7 @@ class BeholderDaemon:
         self._state = StateStore(config.state_db)
         for wp in config.watched_paths:
             self._state.register_watched_path(wp.name)
+            self._reconcile_id_config(wp)
 
         self._clients: dict[str, BeholderClient] = self._build_clients(config)
         # Routing table: each watched path resolves to exactly one client.
@@ -133,6 +134,38 @@ class BeholderDaemon:
     def _build_daemon_id(self) -> str:
         names = sorted(wp.name for wp in self._config.watched_paths)
         return "-".join(names).lower().replace(" ", "-")
+
+    def _reconcile_id_config(self, wp: Any) -> None:
+        """Discard a watched path's state if its id settings changed.
+
+        Files already tracked carry ids captured with the old
+        ``id_patterns``/templates, and there are no guarantees about
+        what happens to them under new ones. Rather than try to
+        reconcile, forget the path's state: the next tick runs a cold
+        scan and everything that matches is re-attached under the new
+        ids. Nothing is removed from the server.
+
+        A DB that has no recorded settings (fresh, or created before
+        they were stored) adopts the current ones without a reset.
+        """
+        current = wp.id_config()
+        stored = self._state.get_id_config(wp.name)
+        if stored == current:
+            return
+        if stored is not None:
+            dropped = self._state.reset_watched_path(wp.name)
+            log.warning(
+                "id settings for %s changed since the last run "
+                "(was %s, now %s): discarded local state for %d tracked "
+                "file(s). A full rescan will run and every matching file "
+                "will be re-attached under the new ids; existing "
+                "attachments on the server are left in place.",
+                wp.name,
+                stored,
+                current,
+                dropped,
+            )
+        self._state.set_id_config(wp.name, current)
 
     def setup(self) -> None:
         """Register signal handlers and initialise loop timers.
@@ -319,7 +352,8 @@ class BeholderDaemon:
         5. Mark successful uploads synced. A ``304`` reply (the server
            already holds identical content, matched by hash) counts as
            success, so an unchanged-but-retouched file isn't re-uploaded
-           forever. Failures are left un-synced and retried next tick.
+           forever. Failures are left un-synced and retried next tick;
+           an exception on one file is logged and the pass carries on.
 
         File uploads only support local paths today; SSH/Cloud entries
         are skipped with a debug log until those backends grow upload
@@ -336,6 +370,13 @@ class BeholderDaemon:
                 for e in pending
                 if e.status in ("new", "modified") and e.ids.get("item_id")
             ]
+            if len(attachable) != len(pending):
+                log.debug(
+                    "%s: %d pending entr(ies) have no item_id or are deletions; "
+                    "not attaching them",
+                    wp.name,
+                    len(pending) - len(attachable),
+                )
             if not attachable:
                 continue
 
@@ -343,87 +384,128 @@ class BeholderDaemon:
             log.info("Attaching %d file(s) for %s", len(attachable), wp.name)
 
             # Per-pass cache: item_id → item dict (or None if the item
-            # couldn't be ensured). Avoids re-querying for each file on
-            # the same item.
+            # doesn't exist and couldn't be created). Avoids re-querying
+            # for each file on the same item.
             item_cache: dict[str, dict[str, Any] | None] = {}
+            # Items whose lookup failed this pass (server down, auth
+            # error, ...): their existence is unknown, so their files are
+            # left pending for the next pass rather than skipped as
+            # "missing".
+            unknown_items: set[str] = set()
 
             synced: list[str] = []
-            for entry in attachable:
-                file_path = wp.path / entry.path
-                item_id = entry.ids["item_id"]
-
-                if item_id not in item_cache:
-                    if wp.item_type:
-                        item_cache[item_id] = client.ensure_item(
-                            item_id=item_id,
-                            item_type=wp.item_type,
-                            collection_id=entry.ids.get("collection_id"),
-                            group_id=entry.ids.get("group_id"),
+            try:
+                for entry in attachable:
+                    try:
+                        self._attach_entry(
+                            wp, client, entry, item_cache, unknown_items, synced
                         )
-                    else:
-                        # No item_type configured → don't create, only
-                        # attach if the item already exists.
-                        item_cache[item_id] = client.fetch_item(item_id)
-
-                item = item_cache[item_id]
-                if item is None:
-                    log.warning(
-                        "Skipping %s: item %s not found and not creatable",
-                        entry.path,
-                        item_id,
-                    )
-                    continue
-
-                replace_id = client.find_existing_file_id(item, file_path.name)
-                result = client.attach_file(
-                    item_id=item_id,
-                    file_path=file_path,
-                    replace_file_id=replace_id,
-                )
-                if result is not None:
-                    synced.append(entry.path)
-                    if result.get("not_modified"):
-                        # Server already holds identical content (it
-                        # compares hashes). Marking it synced anyway is
-                        # the point: otherwise the entry stays pending
-                        # and we re-upload it on every tick.
-                        log.info(
-                            "%s already up to date on item %s",
+                    except Exception:
+                        # One bad file must not abort the pass: the rest
+                        # still get attached, and whatever already
+                        # uploaded is still marked synced below.
+                        log.exception(
+                            "Failed to attach %s to item %s; will retry next pass",
                             entry.path,
-                            item_id,
+                            entry.ids["item_id"],
                         )
-                    else:
-                        log.info(
-                            "Attached %s -> item %s%s",
-                            entry.path,
-                            item_id,
-                            f" (replaced file {replace_id})" if replace_id else "",
-                        )
-
-                    block_type = _match_block_type(file_path.name, wp.block_patterns)
-                    file_id = result.get("file_id")
-                    if (
-                        block_type
-                        and file_id
-                        and client.find_block_for_file(item, block_type, file_id)
-                        is None
-                    ):
-                        block = client.create_block(
-                            item_id=item_id,
-                            block_type=block_type,
-                            file_id=file_id,
-                        )
-                        if block is not None:
-                            log.info(
-                                "Created %s block on item %s for %s",
-                                block_type,
-                                item_id,
-                                entry.path,
-                            )
-
-            if synced:
-                self._state.mark_synced(wp.name, synced)
+            finally:
+                if synced:
+                    self._state.mark_synced(wp.name, synced)
             self._state.remove_deleted(wp.name)
+
+    def _attach_entry(
+        self,
+        wp: LocalWatchedPath,
+        client: BeholderClient,
+        entry: DiffEntry,
+        item_cache: dict[str, dict[str, Any] | None],
+        unknown_items: set[str],
+        synced: list[str],
+    ) -> None:
+        """Attach one pending file (steps 2-4 of ``_attach_matched_files``).
+
+        Appends ``entry.path`` to ``synced`` as soon as the upload
+        succeeds, *before* any block creation: the bytes being on the
+        server is what matters, and nothing after that should cause a
+        re-upload.
+        """
+        file_path = wp.path / entry.path
+        item_id = entry.ids["item_id"]
+
+        if item_id in unknown_items:
+            log.debug("Skipping %s: item %s lookup failed", entry.path, item_id)
+            return
+
+        if item_id not in item_cache:
+            try:
+                if wp.item_type:
+                    item_cache[item_id] = client.ensure_item(
+                        item_id=item_id,
+                        item_type=wp.item_type,
+                        collection_id=entry.ids.get("collection_id"),
+                        group_id=entry.ids.get("group_id"),
+                    )
+                else:
+                    # No item_type configured → don't create, only
+                    # attach if the item already exists.
+                    item_cache[item_id] = client.fetch_item(item_id)
+            except ItemLookupError as e:
+                log.warning("%s; its files will be retried next pass", e)
+                unknown_items.add(item_id)
+                return
+
+        item = item_cache[item_id]
+        if item is None:
+            log.warning(
+                "Skipping %s: item %s not found and not creatable",
+                entry.path,
+                item_id,
+            )
+            return
+
+        replace_id = client.find_existing_file_id(item, file_path.name)
+        result = client.attach_file(
+            item_id=item_id,
+            file_path=file_path,
+            replace_file_id=replace_id,
+        )
+        if result is None:
+            return
+
+        synced.append(entry.path)
+        if result.get("not_modified"):
+            # Server already holds identical content (it compares
+            # hashes). Marking it synced anyway is the point: otherwise
+            # the entry stays pending and we re-upload it on every tick.
+            log.info("%s already up to date on item %s", entry.path, item_id)
+        else:
+            log.info(
+                "Attached %s -> item %s%s",
+                entry.path,
+                item_id,
+                f" (replaced file {replace_id})" if replace_id else "",
+            )
+
+        block_type = _match_block_type(file_path.name, wp.block_patterns)
+        file_id = result.get("file_id")
+        if (
+            block_type
+            and file_id
+            and client.find_block_for_file(item, block_type, file_id) is None
+        ):
+            block = client.create_block(
+                item_id=item_id,
+                block_type=block_type,
+                file_id=file_id,
+            )
+            if block is not None:
+                log.info(
+                    "Created %s block on item %s for %s",
+                    block_type,
+                    item_id,
+                    entry.path,
+                )
 
 
 # ----------------------------------------------------------------------
@@ -436,7 +518,9 @@ class PlannedAction:
     """One thing the daemon would have done, as reported by `dry_run`."""
 
     watched_path: str
-    action: str  # "create_item" | "upload" | "replace" | "create_block" | "skip"
+    # "reset_state" | "create_item" | "upload" | "replace" | "create_block" |
+    # "skip" | "attach_unknown"
+    action: str
     item_id: str
     path: str = ""
     detail: str = ""
@@ -466,7 +550,7 @@ def dry_run(
     unreachable.
     """
     from datalab_beholder.scanner import scan_directory
-    from datalab_beholder.state import DiffEntry, DiffResult
+    from datalab_beholder.state import DiffResult
 
     if clients is None:
         clients = {}
@@ -532,7 +616,28 @@ def dry_run(
                 scan.scan_duration_ms,
             )
 
-            if state is not None:
+            stored_id_config = (
+                state.get_id_config(wp.name) if state is not None else None
+            )
+            id_config_changed = (
+                stored_id_config is not None and stored_id_config != wp.id_config()
+            )
+            if id_config_changed:
+                log.warning(
+                    "%s: id settings changed since the last run (was %s, now "
+                    "%s) — the daemon will discard this path's local state on "
+                    "startup; treating every matched file as new",
+                    wp.name,
+                    stored_id_config,
+                    wp.id_config(),
+                )
+                actions.append(
+                    PlannedAction(
+                        wp.name, "reset_state", "", detail="id settings changed"
+                    )
+                )
+
+            if state is not None and not id_config_changed:
                 diff = state.classify_scan(scan)
             else:
                 diff = DiffResult(watched_path_name=wp.name)
@@ -607,14 +712,40 @@ def dry_run(
                 continue
 
             item_cache: dict[str, dict[str, Any] | None] = {}
+            unknown_items: set[str] = set()
             would_create: set[str] = set()
 
             for entry in attachable:
                 item_id = entry.ids["item_id"]
                 filename = entry.path.rsplit("/", 1)[-1]
 
+                if item_id in unknown_items:
+                    actions.append(
+                        PlannedAction(
+                            wp.name,
+                            "attach_unknown",
+                            item_id,
+                            entry.path,
+                            "item lookup failed",
+                        )
+                    )
+                    continue
                 if item_id not in item_cache:
-                    item_cache[item_id] = client.fetch_item(item_id)
+                    try:
+                        item_cache[item_id] = client.fetch_item(item_id)
+                    except ItemLookupError as e:
+                        log.error("%s — server state for its files is unknown", e)
+                        unknown_items.add(item_id)
+                        actions.append(
+                            PlannedAction(
+                                wp.name,
+                                "attach_unknown",
+                                item_id,
+                                entry.path,
+                                "item lookup failed",
+                            )
+                        )
+                        continue
                 item = item_cache[item_id]
 
                 replace_id: str | None = None

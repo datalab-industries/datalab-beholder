@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS watched_paths (
     last_hot_scan REAL,
     last_warm_scan REAL,
     last_cold_scan REAL,
-    last_max_dir_mtime REAL
+    last_max_dir_mtime REAL,
+    id_config TEXT
 );
 
 """
@@ -41,18 +42,24 @@ _SANITISE_RE = re.compile(r"[^A-Za-z0-9_]")
 
 
 def _in_scope_filter(changed_dirs: list[str]):
-    """Build a predicate `path -> bool` that returns True if `path` is
-    inside any of the directories in `changed_dirs`.
+    """Build a predicate `path -> bool` that returns True if `path`'s
+    immediate parent directory is one of `changed_dirs`.
 
-    Empty string in `changed_dirs` means the watched-path root itself was
-    rescanned, which scopes the entire tree.
+    A warm scan only enumerates the files of the directories it lists in
+    `changed_dirs` (`""` is the watched-path root), so only files
+    directly inside those can be concluded deleted. Deeper
+    subdirectories were short-circuited on their own mtime and are out
+    of scope even when an ancestor was rescanned. (Files under a
+    subdirectory that was removed outright are therefore left for the
+    cold scan to prune.)
     """
-    if "" in changed_dirs:
-        return lambda _path: True
-    prefixes = tuple(d.rstrip("/") + "/" for d in changed_dirs if d)
-    if not prefixes:
-        return lambda _path: False
-    return lambda path: path.startswith(prefixes)
+    scanned = {d.strip("/") for d in changed_dirs}
+
+    def _in_scope(path: str) -> bool:
+        parent, _, _ = path.rpartition("/")
+        return parent in scanned
+
+    return _in_scope
 
 
 def _sanitise_name(name: str) -> str:
@@ -142,6 +149,7 @@ class StateStore:
         self._conn = sqlite3.connect(str(self._db_path))
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(REGISTRY_SCHEMA)
+        self._add_missing_registry_columns()
         self._wipe_legacy_files_table()
 
     def close(self) -> None:
@@ -175,6 +183,20 @@ class StateStore:
             if cursor.fetchone() is not None:
                 self._conn.execute(f"DROP TABLE {name}")
         self._conn.commit()
+
+    def _add_missing_registry_columns(self) -> None:
+        """Add registry columns introduced after a DB was first created.
+
+        ``CREATE TABLE IF NOT EXISTS`` leaves an existing table alone, so
+        older DBs need the new columns added explicitly.
+        """
+        columns = {
+            row["name"]
+            for row in self._conn.execute("PRAGMA table_info(watched_paths)")
+        }
+        if "id_config" not in columns:
+            self._conn.execute("ALTER TABLE watched_paths ADD COLUMN id_config TEXT")
+            self._conn.commit()
 
     def register_watched_path(self, name: str) -> None:
         """Idempotently register a watched path, creating its file table.
@@ -231,6 +253,43 @@ class StateStore:
         self._conn.execute(f"DROP TABLE IF EXISTS files__{table}")
         self._conn.execute("DELETE FROM watched_paths WHERE name = ?", (name,))
         self._conn.commit()
+
+    def get_id_config(self, watched_path_name: str) -> str | None:
+        """Return the id settings recorded for a watched path, or ``None``
+        if none were recorded (unregistered path, or a DB from before
+        they were stored)."""
+        try:
+            row = self._conn.execute(
+                "SELECT id_config FROM watched_paths WHERE name = ?",
+                (watched_path_name,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Pre-`id_config` DB opened read-only, so never migrated.
+            return None
+        return None if row is None else row["id_config"]
+
+    def set_id_config(self, watched_path_name: str, id_config: str) -> None:
+        cursor = self._conn.execute(
+            "UPDATE watched_paths SET id_config = ? WHERE name = ?",
+            (id_config, watched_path_name),
+        )
+        if cursor.rowcount == 0:
+            raise UnknownWatchedPathError(
+                f"watched_path {watched_path_name!r} is not registered"
+            )
+        self._conn.commit()
+
+    def reset_watched_path(self, watched_path_name: str) -> int:
+        """Forget every tracked file for a watched path and clear its scan
+        clocks, so the next tick starts over with a cold scan.
+
+        Returns the number of file rows discarded.
+        """
+        table = self._table_for(watched_path_name)
+        cursor = self._conn.execute(f"DELETE FROM files__{table}")
+        self._conn.commit()
+        self.clear_scan_timestamps(watched_path_name)
+        return cursor.rowcount
 
     def list_watched_paths(self) -> list[str]:
         cursor = self._conn.execute("SELECT name FROM watched_paths ORDER BY name")

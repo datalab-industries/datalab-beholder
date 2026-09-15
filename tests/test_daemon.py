@@ -8,6 +8,7 @@ from pathlib import Path
 
 from datalab_beholder.config import BeholderConfig
 from datalab_beholder.daemon import BeholderDaemon
+from datalab_beholder.scanner import scan_directory
 from tests.conftest import MockTransport, _make_beholder_client
 
 
@@ -114,6 +115,57 @@ class TestBeholderDaemon:
         assert ts.max_dir_mtime is None
         # Cleared clocks mean the next tick picks the cold tier again.
         assert daemon._select_scan_tier(config.watched_paths[0], time.time()) == "cold"
+
+    def test_id_config_recorded_without_reset_on_first_run(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """A path with no recorded id settings (fresh, or a DB from before
+        they were stored) adopts the current ones and keeps its state."""
+        config = self._make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        daemon = self._make_daemon(config, MockTransport(), monkeypatch)
+        daemon._state.update_from_scan(scan_directory(tmp_tree, name=wp.name))
+        tracked = len(daemon._state.get_pending_changes(wp.name))
+
+        daemon._reconcile_id_config(wp)
+
+        assert daemon._state.get_id_config(wp.name) == wp.id_config()
+        assert len(daemon._state.get_pending_changes(wp.name)) == tracked
+
+    def test_unchanged_id_config_keeps_state(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        config = self._make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        daemon = self._make_daemon(config, MockTransport(), monkeypatch)
+        daemon._reconcile_id_config(wp)
+        daemon._state.update_from_scan(scan_directory(tmp_tree, name=wp.name))
+        daemon._state.update_scan_timestamp(wp.name, "cold", 300.0)
+
+        daemon._reconcile_id_config(wp)
+
+        assert daemon._state.get_pending_changes(wp.name) != []
+        assert daemon._state.get_scan_timestamps(wp.name).cold == 300.0
+
+    def test_changed_id_config_resets_path_state(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch, caplog
+    ) -> None:
+        """#52: editing id_patterns discards the path's state so the next
+        tick rescans from scratch under the new ids."""
+        config = self._make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        daemon = self._make_daemon(config, MockTransport(), monkeypatch)
+        daemon._reconcile_id_config(wp)
+        daemon._state.update_from_scan(scan_directory(tmp_tree, name=wp.name))
+        daemon._state.update_scan_timestamp(wp.name, "cold", 300.0)
+
+        wp.id_patterns = [r"(?P<item_id>file[0-9]+)"]
+        daemon._reconcile_id_config(wp)
+
+        assert daemon._state.get_pending_changes(wp.name) == []
+        assert daemon._select_scan_tier(wp, time.time()) == "cold"
+        assert daemon._state.get_id_config(wp.name) == wp.id_config()
+        assert any("id settings for" in r.getMessage() for r in caplog.records)
 
     def test_first_tick_runs_cold_scan_when_state_empty(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
@@ -930,6 +982,107 @@ class TestE2EAttachFlow:
         )
         # A retry happened.
         assert upload_count_after > upload_count_before
+
+    def test_block_failure_after_upload_still_marks_files_synced(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#49: the server not yet listing a just-uploaded file makes
+        block creation raise; the uploads must still count as synced so
+        they aren't re-uploaded every pass."""
+        root = _attach_tree(tmp_path)
+        for name in ("42-cell-b.mpr", "42-cell-c.mpr"):
+            (root / name).write_bytes(b"\x01" * 8)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                    "file_ObjectIds": [],  # uploaded file not listed yet
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        uploads = [r for r in transport.requests if r.url.path == "/upload-file/"]
+        assert len(uploads) == 3
+        assert daemon._state.get_pending_changes("cells") == []
+        assert daemon.sync_status == "idle"
+
+    def test_exception_on_one_file_does_not_abort_pass(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#49: an unexpected exception on one file is logged; the files
+        before and after it are still attached and marked synced."""
+        root = _attach_tree(tmp_path)
+        for name in ("42-cell-b.mpr", "42-cell-c.mpr"):
+            (root / name).write_bytes(b"\x01" * 8)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                }
+            },
+        )
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        client = daemon._clients["test"]
+
+        def flaky_attach(item_id, file_path, replace_file_id=None):
+            if file_path.name == "42-cell-b.mpr":
+                raise ValueError("boom")
+            return {"status": "success", "file_id": f"id-{file_path.name}"}
+
+        monkeypatch.setattr(client, "attach_file", flaky_attach)
+        daemon.setup()
+        daemon.tick()
+
+        pending = daemon._state.get_pending_changes("cells")
+        assert [e.path for e in pending] == ["42-cell-b.mpr"]
+
+    def test_item_lookup_server_error_does_not_create_item(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """#53: a 503 on the item lookup is not "item missing" — no create
+        attempt, no upload, and the file stays pending for next pass."""
+        root = _attach_tree(tmp_path)
+        (root / "42-cell-b.mpr").write_bytes(b"\x01" * 8)
+        config = _attach_config(tmp_path, root)
+        transport = MockTransport()
+        transport.add_response("GET", "/get-item-data/42", status_code=503)
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        paths = [r.url.path for r in transport.requests]
+        assert "/new-sample/" not in paths
+        assert "/upload-file/" not in paths
+        # Looked up once for the item, not once per file.
+        assert paths.count("/get-item-data/42") == 1
+        pending = daemon._state.get_pending_changes("cells")
+        assert {e.path for e in pending} == {"42-cell-formation.mpr", "42-cell-b.mpr"}
 
 
 class TestMultiDatalabRouting:

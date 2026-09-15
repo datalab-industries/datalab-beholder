@@ -563,3 +563,56 @@ class TestIdsRoundTrip:
         pending = store.get_pending_changes("wp")
         assert pending[0].ids == {}
         store.close()
+
+
+class TestIdConfig:
+    def test_round_trip(self, tmp_path: Path) -> None:
+        store = StateStore(tmp_path / "s.db")
+        store.register_watched_path("wp")
+        assert store.get_id_config("wp") is None
+        store.set_id_config("wp", '{"id_patterns": []}')
+        assert store.get_id_config("wp") == '{"id_patterns": []}'
+        assert store.get_id_config("unregistered") is None
+        store.close()
+
+    def test_reset_watched_path_only_touches_that_path(
+        self, tmp_path: Path, tmp_tree: Path
+    ) -> None:
+        store = StateStore(tmp_path / "s.db")
+        for name in ("a", "b"):
+            store.register_watched_path(name)
+            store.update_from_scan(scan_directory(tmp_tree, name=name))
+            store.update_scan_timestamp(name, "cold", 300.0)
+            store.update_max_dir_mtime(name, 12345.0)
+
+        dropped = store.reset_watched_path("a")
+
+        assert dropped > 0
+        assert store.get_pending_changes("a") == []
+        assert store.get_scan_timestamps("a").cold is None
+        assert store.get_scan_timestamps("a").max_dir_mtime is None
+        assert len(store.get_pending_changes("b")) == dropped
+        assert store.get_scan_timestamps("b").cold == 300.0
+        store.close()
+
+    def test_pre_id_config_db_is_migrated(self, tmp_path: Path) -> None:
+        db = tmp_path / "s.db"
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            "CREATE TABLE watched_paths (name TEXT PRIMARY KEY, "
+            "table_name TEXT NOT NULL UNIQUE, last_hot_scan REAL, "
+            "last_warm_scan REAL, last_cold_scan REAL, last_max_dir_mtime REAL);"
+            "INSERT INTO watched_paths (name, table_name) VALUES ('wp', 'wp');"
+        )
+        conn.close()
+
+        # Read-only can't migrate, but mustn't fail either.
+        ro = StateStore(db, read_only=True)
+        assert ro.get_id_config("wp") is None
+        ro.close()
+
+        store = StateStore(db)
+        assert store.get_id_config("wp") is None
+        store.set_id_config("wp", "{}")
+        assert store.get_id_config("wp") == "{}"
+        store.close()
