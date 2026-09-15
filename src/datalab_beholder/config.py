@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -255,6 +256,23 @@ class WatchedPathBase(BaseModel):
                     f"block_patterns[{pattern!r}] must map to a non-empty block type"
                 )
         return v
+
+    def id_config(self) -> str:
+        """Canonical JSON of the settings that decide a file's captured ids.
+
+        The state DB stores this per watched path. Changing any of these
+        settings has no defined effect on files already tracked, so the
+        daemon discards that path's state on startup when it no longer
+        matches (see ``BeholderDaemon._reconcile_id_config``).
+        """
+        return json.dumps(
+            {
+                "id_patterns": self.id_patterns,
+                "item_id_template": self.item_id_template,
+                "collection_id_template": self.collection_id_template,
+            },
+            sort_keys=True,
+        )
 
     def hot_scan(self, state: StateStore) -> DiffResult:
         """Stat recently-modified files; cheap, runs frequently."""

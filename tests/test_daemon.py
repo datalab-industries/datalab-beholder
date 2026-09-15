@@ -13,6 +13,7 @@ import pytest
 
 from datalab_beholder.config import BeholderConfig
 from datalab_beholder.daemon import BeholderDaemon
+from datalab_beholder.scanner import scan_directory
 from tests.conftest import MockTransport, _make_beholder_client
 
 
@@ -136,6 +137,57 @@ class TestBeholderDaemon:
         assert ts.max_dir_mtime is None
         # Cleared clocks mean the next tick picks the cold tier again.
         assert daemon._select_scan_tier(config.watched_paths[0], time.time()) == "cold"
+
+    def test_id_config_recorded_without_reset_on_first_run(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """A path with no recorded id settings (fresh, or a DB from before
+        they were stored) adopts the current ones and keeps its state."""
+        config = self._make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        daemon = self._make_daemon(config, MockTransport(), monkeypatch)
+        daemon._state.update_from_scan(scan_directory(tmp_tree, name=wp.name))
+        tracked = len(daemon._state.get_pending_changes(wp.name))
+
+        daemon._reconcile_id_config(wp)
+
+        assert daemon._state.get_id_config(wp.name) == wp.id_config()
+        assert len(daemon._state.get_pending_changes(wp.name)) == tracked
+
+    def test_unchanged_id_config_keeps_state(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        config = self._make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        daemon = self._make_daemon(config, MockTransport(), monkeypatch)
+        daemon._reconcile_id_config(wp)
+        daemon._state.update_from_scan(scan_directory(tmp_tree, name=wp.name))
+        daemon._state.update_scan_timestamp(wp.name, "cold", 300.0)
+
+        daemon._reconcile_id_config(wp)
+
+        assert daemon._state.get_pending_changes(wp.name) != []
+        assert daemon._state.get_scan_timestamps(wp.name).cold == 300.0
+
+    def test_changed_id_config_resets_path_state(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch, caplog
+    ) -> None:
+        """#52: editing id_patterns discards the path's state so the next
+        tick rescans from scratch under the new ids."""
+        config = self._make_config(tmp_path, tmp_tree)
+        wp = config.watched_paths[0]
+        daemon = self._make_daemon(config, MockTransport(), monkeypatch)
+        daemon._reconcile_id_config(wp)
+        daemon._state.update_from_scan(scan_directory(tmp_tree, name=wp.name))
+        daemon._state.update_scan_timestamp(wp.name, "cold", 300.0)
+
+        wp.id_patterns = [r"(?P<item_id>file[0-9]+)"]
+        daemon._reconcile_id_config(wp)
+
+        assert daemon._state.get_pending_changes(wp.name) == []
+        assert daemon._select_scan_tier(wp, time.time()) == "cold"
+        assert daemon._state.get_id_config(wp.name) == wp.id_config()
+        assert any("id settings for" in r.getMessage() for r in caplog.records)
 
     def test_first_tick_runs_cold_scan_when_state_empty(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch

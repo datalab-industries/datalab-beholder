@@ -253,6 +253,7 @@ def dry_run(config_path: Path | None, log_level: str | None) -> None:
         return
 
     labels = {
+        "reset_state": "discard local state — id settings changed since the last run",
         "create_item": "create {n} item(s): {items}",
         "upload": "upload {n} new file(s)",
         "replace": "replace {n} existing file(s)",
@@ -354,5 +355,12 @@ def status(config_path: Path | None) -> None:
 
             pending = state.get_pending_changes(wp.name)
             click.echo(f"  Pending changes: {len(pending)}")
+
+            stored_id_config = state.get_id_config(wp.name)
+            if stored_id_config is not None and stored_id_config != wp.id_config():
+                click.echo(
+                    "  id settings changed since the last run: local state "
+                    "will be discarded and rebuilt on next start"
+                )
     finally:
         state.close()
