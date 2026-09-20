@@ -1,0 +1,69 @@
+# Example: the three `block_mode` settings side by side.
+#
+# All three watched paths point at the same `data/` folder, but each
+# renders its own item ids (via `item_id_template`) so the results land on
+# separate items and can be compared in the datalab UI:
+#
+#   bmdemo1-per-file       3 tabular blocks, one per file
+#   bmdemo1-per-item       1 tabular block, wired to the first file attached
+#   bmdemo1-all-files      1 tabular block, wired to all three files
+#
+# (and the same for bmdemo2, which only has one file, so every mode gives
+# a single block).
+#
+# Relative paths below are resolved against this file's directory.
+version: 1
+
+datalabs:
+  - name: "demo"
+    url: "https://datalab.example.org"  # <- your datalab instance
+    # api_key: "..."                    # or set DATALAB_API_KEY
+
+watched_paths:
+  - kind: "local"
+    name: "per-file"
+    path: "data"
+    datalab: "demo"
+    item_type: "samples"
+    include_patterns: ["*.csv"]
+    id_patterns:
+      - "^(?P<item_id>bmdemo[0-9]+)-.*\\.csv$"
+    item_id_template: "{item_id}-per-file"
+    block_patterns:
+      "*.csv": "tabular"
+    block_mode: "per_file"
+
+  - kind: "local"
+    name: "per-item"
+    path: "data"
+    datalab: "demo"
+    item_type: "samples"
+    include_patterns: ["*.csv"]
+    id_patterns:
+      - "^(?P<item_id>bmdemo[0-9]+)-.*\\.csv$"
+    item_id_template: "{item_id}-per-item"
+    block_patterns:
+      "*.csv": "tabular"
+    block_mode: "per_item"
+
+  - kind: "local"
+    name: "all-files"
+    path: "data"
+    datalab: "demo"
+    item_type: "samples"
+    include_patterns: ["*.csv"]
+    id_patterns:
+      - "^(?P<item_id>bmdemo[0-9]+)-.*\\.csv$"
+    item_id_template: "{item_id}-all-files"
+    block_patterns:
+      "*.csv": "tabular"
+    block_mode: "per_item_all_files"
+
+sync:
+  metadata_interval: 10  # attach soon after startup
+
+# Scan straight away on start rather than waiting out the scan intervals.
+reset_scan_clocks_on_startup: true
+
+log_level: "info"
+state_db: "state.db"

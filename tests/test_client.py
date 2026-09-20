@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from tests.conftest import _make_beholder_client
@@ -297,6 +298,80 @@ class TestBeholderClient:
         assert result.get("blocktype") == "cycle"
         methods = [(r.method, r.url.path) for r in mock_transport.requests]
         assert ("POST", "/add-data-block/") in methods
+
+    def test_find_block_of_type_ignores_file_id(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        item = {
+            "blocks_obj": {
+                "b1": {"blocktype": "tabular", "file_id": "other"},
+                "b2": {"blocktype": "cycle", "file_id": "other"},
+            }
+        }
+        assert client.find_block_of_type(item, "cycle") == "b2"
+        assert client.find_block_of_type(item, "nmr") is None
+        assert client.find_block_of_type({}, "cycle") is None
+
+    def test_block_file_ids_covers_both_shapes(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        assert client.block_file_ids({"file_id": "a"}) == ["a"]
+        assert client.block_file_ids({"file_ids": ["a", "b"]}) == ["a", "b"]
+        # A block that carries both keys shouldn't report a duplicate.
+        assert client.block_file_ids({"file_ids": ["a", "b"], "file_id": "a"}) == [
+            "a",
+            "b",
+        ]
+        assert client.block_file_ids({}) == []
+
+    def test_update_block_files_sends_file_ids(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        mock_transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={
+                "new_block_data": {"blocktype": "cycle", "file_ids": ["a", "b"]}
+            },
+        )
+
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        result = client.update_block_files(
+            item_id="item-1",
+            block_id="block-1",
+            block_type="cycle",
+            block={"blocktype": "cycle", "file_id": "a", "title": "keep me"},
+            file_ids=["a", "b"],
+        )
+
+        assert result is not None
+        req = next(r for r in mock_transport.requests if r.url.path == "/update-block/")
+        sent = json.loads(req.content)["block_data"]
+        assert sent["file_ids"] == ["a", "b"]
+        assert "file_id" not in sent
+        assert sent["title"] == "keep me"
+        assert sent["block_id"] == "block-1"
+
+    def test_update_block_files_error_returns_none(
+        self, mock_transport, monkeypatch
+    ) -> None:
+        mock_transport.add_response(
+            "POST", "/update-block/", status_code=500, json_data={"error": "boom"}
+        )
+        client = _make_beholder_client(mock_transport, monkeypatch)
+        assert (
+            client.update_block_files(
+                item_id="item-1",
+                block_id="block-1",
+                block_type="cycle",
+                block={"blocktype": "cycle", "file_id": "a"},
+                file_ids=["a", "b"],
+            )
+            is None
+        )
 
     def test_create_block_error_returns_none(self, mock_transport, monkeypatch) -> None:
         mock_transport.add_response(

@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Literal
+
+import pytest
 
 from datalab_beholder.config import BeholderConfig
 from datalab_beholder.daemon import BeholderDaemon
@@ -66,6 +71,23 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
         assert daemon._daemon_id == "test-data"
+
+    def test_shutdown_closes_the_state_db(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """A leaked SQLite handle is harmless on POSIX (an unlinked file
+        stays readable until closed) but stops Windows deleting or
+        replacing `state.db` — which is what the GUI's stop button and a
+        manual re-sync both need."""
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+
+        daemon.shutdown()
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            daemon._state._conn.execute("SELECT 1")
 
     def test_setup_initialises_timers_without_scanning(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
@@ -245,6 +267,135 @@ def _attach_config(tmp_path: Path, root: Path) -> BeholderConfig:
         sync={"metadata_interval": 0},
         state_db=tmp_path / "state.db",
     )
+
+
+BlockMode = Literal["per_file", "per_item", "per_item_all_files"]
+
+
+def _multi_file_tree(tmp_path: Path) -> Path:
+    """Three files that all belong to item 42."""
+    data = tmp_path / "data"
+    data.mkdir()
+    for name in ("42-a.mpr", "42-b.mpr", "42-c.mpr"):
+        (data / name).write_bytes(b"\x00" * 16)
+    return data
+
+
+class TestBlockModesMultiFile:
+    """Several matching files on one item, attached in a single pass.
+
+    The item is fetched once per pass, so these check that blocks made
+    earlier in the pass are taken into account for later files.
+    """
+
+    def _run(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        block_mode: BlockMode,
+        new_block: dict | None = None,
+    ) -> MockTransport:
+        root = _multi_file_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        config.watched_paths[0].block_mode = block_mode
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {},
+                    "display_order": [],
+                    "files": [],
+                    "file_ObjectIds": ["f1", "f2", "f3"],
+                }
+            },
+        )
+        # Each upload gets its own file id.
+        for file_id in ("f1", "f2", "f3"):
+            transport.add_response(
+                "POST",
+                "/upload-file/",
+                status_code=201,
+                json_data={"status": "success", "file_id": file_id},
+            )
+        # `create_data_block` hands back the /update-block/ reply, so the
+        # block id the daemon sees comes from there.
+        if new_block is None:
+            new_block = {"blocktype": "cycle", "block_id": "block-new"}
+        transport.add_response(
+            "POST",
+            "/add-data-block/",
+            status_code=200,
+            json_data={"new_block_obj": new_block},
+        )
+        transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={"new_block_data": new_block},
+        )
+
+        daemon = TestBeholderDaemon()._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+        return transport
+
+    @staticmethod
+    def _posts(transport: MockTransport, path: str) -> list[dict]:
+        return [
+            json.loads(r.content)
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == path
+        ]
+
+    def test_per_file_creates_one_block_per_file(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        transport = self._run(tmp_path, monkeypatch, "per_file")
+        assert len(self._posts(transport, "/add-data-block/")) == 3
+
+    def test_per_item_creates_only_the_first_block(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        transport = self._run(tmp_path, monkeypatch, "per_item")
+        assert len(self._posts(transport, "/add-data-block/")) == 1
+        # Only the update that wires the new block to its first file.
+        updates = self._posts(transport, "/update-block/")
+        assert [u["block_data"].get("file_id") for u in updates] == ["f1"]
+
+    def test_per_item_all_files_wires_later_files_into_the_new_block(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        transport = self._run(tmp_path, monkeypatch, "per_item_all_files")
+        assert len(self._posts(transport, "/add-data-block/")) == 1
+        updates = [u["block_data"] for u in self._posts(transport, "/update-block/")]
+        # Creation wires f1; each later file rewrites the growing list.
+        assert updates[0].get("file_id") == "f1"
+        assert [u.get("file_ids") for u in updates[1:]] == [
+            ["f1", "f2"],
+            ["f1", "f2", "f3"],
+        ]
+        assert all(u.get("block_id") == "block-new" for u in updates[1:])
+
+    def test_per_item_all_files_defers_when_block_id_unknown(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The server didn't return a block id, so the block can't be
+        updated until a later pass re-fetches the item — but no second
+        block is created either."""
+        transport = self._run(
+            tmp_path,
+            monkeypatch,
+            "per_item_all_files",
+            new_block={"blocktype": "cycle"},
+        )
+        assert len(self._posts(transport, "/add-data-block/")) == 1
+        assert len(self._posts(transport, "/update-block/")) == 1
 
 
 class TestE2EAttachFlow:
@@ -583,6 +734,155 @@ class TestE2EAttachFlow:
 
         methods = [(r.method, r.url.path) for r in transport.requests]
         assert ("POST", "/add-data-block/") in methods
+
+    def test_per_item_block_mode_reuses_block_wired_to_another_file(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """With ``block_mode: per_item``, an existing block of the matched
+        type is enough — even though it is wired to a different file, no
+        second block is created."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        config.watched_paths[0].block_mode = "per_item"
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {
+                        "block-1": {"blocktype": "cycle", "file_id": "some-other-file"}
+                    },
+                    "display_order": ["block-1"],
+                    "files": [],
+                    "file_ObjectIds": ["file-xyz"],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/upload-file/") in methods
+        assert ("POST", "/add-data-block/") not in methods
+
+    def test_per_item_all_files_mode_wires_file_into_existing_block(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """With ``block_mode: per_item_all_files``, the existing block of
+        the matched type is updated to carry the newly-attached file
+        alongside the one it already holds."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        config.watched_paths[0].block_mode = "per_item_all_files"
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {
+                        "block-1": {"blocktype": "cycle", "file_id": "some-other-file"}
+                    },
+                    "display_order": ["block-1"],
+                    "files": [],
+                    "file_ObjectIds": ["file-xyz"],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+        transport.add_response(
+            "POST",
+            "/update-block/",
+            status_code=200,
+            json_data={
+                "new_block_data": {
+                    "blocktype": "cycle",
+                    "file_ids": ["some-other-file", "file-xyz"],
+                }
+            },
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/add-data-block/") not in methods
+        update_req = next(
+            r
+            for r in transport.requests
+            if r.method == "POST" and r.url.path == "/update-block/"
+        )
+        sent = json.loads(update_req.content)["block_data"]
+        assert sent["file_ids"] == ["some-other-file", "file-xyz"]
+        assert sent["block_id"] == "block-1"
+
+    def test_per_item_all_files_mode_no_update_when_file_already_wired(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """The block already lists this file (a modified file re-attached
+        under the same immutable id) — nothing to create or update."""
+        root = _attach_tree(tmp_path)
+        config = _attach_config(tmp_path, root)
+        config.watched_paths[0].block_patterns = {"*.mpr": "cycle"}
+        config.watched_paths[0].block_mode = "per_item_all_files"
+        transport = MockTransport()
+
+        transport.add_response(
+            "GET",
+            "/get-item-data/42",
+            status_code=200,
+            json_data={
+                "item_data": {
+                    "item_id": "42",
+                    "blocks_obj": {
+                        "block-1": {
+                            "blocktype": "cycle",
+                            "file_ids": ["other", "file-xyz"],
+                        }
+                    },
+                    "display_order": ["block-1"],
+                    "files": [],
+                }
+            },
+        )
+        transport.add_response(
+            "POST",
+            "/upload-file/",
+            status_code=201,
+            json_data={"status": "success", "file_id": "file-xyz"},
+        )
+
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+        daemon.tick()
+
+        methods = [(r.method, r.url.path) for r in transport.requests]
+        assert ("POST", "/upload-file/") in methods
+        assert ("POST", "/add-data-block/") not in methods
+        assert ("POST", "/update-block/") not in methods
 
     def test_no_block_pattern_configured_skips_block_creation(
         self, tmp_path: Path, monkeypatch

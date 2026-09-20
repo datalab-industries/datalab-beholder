@@ -74,11 +74,16 @@ def sample_config(tmp_path: Path, tmp_tree: Path) -> BeholderConfig:
 
 
 class MockTransport(httpx.BaseTransport):
-    """A mock httpx transport that returns canned responses."""
+    """A mock httpx transport that returns canned responses.
+
+    Registering several responses for the same method + path queues
+    them: each request consumes the next one, and the last is repeated
+    once the queue runs dry.
+    """
 
     def __init__(self):
         self.requests: list[httpx.Request] = []
-        self.responses: dict[str, httpx.Response] = {}
+        self.responses: dict[str, list[httpx.Response]] = {}
 
     def add_response(
         self,
@@ -91,10 +96,12 @@ class MockTransport(httpx.BaseTransport):
         # A real 304 carries no entity body, so don't invent one — the
         # upload path has to cope with an empty response.
         body = b"" if status_code == 304 else json.dumps(json_data or {}).encode()
-        self.responses[key] = httpx.Response(
-            status_code=status_code,
-            content=body,
-            headers={"content-type": "application/json"},
+        self.responses.setdefault(key, []).append(
+            httpx.Response(
+                status_code=status_code,
+                content=body,
+                headers={"content-type": "application/json"},
+            )
         )
 
     def handle_request(self, request: httpx.Request) -> httpx.Response:
@@ -103,8 +110,9 @@ class MockTransport(httpx.BaseTransport):
         request.read()
         self.requests.append(request)
         key = f"{request.method} {request.url.path}"
-        if key in self.responses:
-            return self.responses[key]
+        queue = self.responses.get(key)
+        if queue:
+            return queue.pop(0) if len(queue) > 1 else queue[0]
         return httpx.Response(404, content=b'{"error": "not found"}')
 
 

@@ -72,6 +72,12 @@ watched_paths:
     # block_patterns:
     #   "*.mpr": "cycle"
     #   "*.nda": "cycle"
+    # How many blocks of a given type to create per item:
+    #   per_file (default)  — one block per attached file
+    #   per_item            — at most one block of each type on the item
+    #   per_item_all_files  — one block per type, with every matching file
+    #                         wired into it
+    # block_mode: "per_file"
     # scan:
     #   hot_interval: 60        # stat recently-modified files
     #   warm_interval: 3600     # directory-mtime walk
@@ -182,6 +188,21 @@ class WatchedPathBase(BaseModel):
             "and the first match wins."
         ),
         examples=[{"*.mpr": "cycle", "*.nda": "cycle"}],
+    )
+
+    block_mode: Literal["per_file", "per_item", "per_item_all_files"] = Field(
+        "per_file",
+        description=(
+            "How many blocks to create for a given block type on one item. "
+            "`per_file` (default) creates one block per attached file, so an item "
+            "with five matching files ends up with five blocks of that type. "
+            "`per_item` creates at most one block of each type per item — the "
+            "first matching file gets a block, and later files are attached "
+            "without adding more blocks of that type. `per_item_all_files` also "
+            "keeps a single block per type, but wires every matching file into "
+            "it, so the block plots all of them together."
+        ),
+        examples=["per_file", "per_item", "per_item_all_files"],
     )
 
     item_id_template: str | None = Field(
