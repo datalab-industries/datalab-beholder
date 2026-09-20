@@ -357,8 +357,14 @@ class BeholderDaemon:
             self.shutdown()
 
     def shutdown(self) -> None:
-        """Clean up resources. (No background threads to stop in the
-        scan-based design — this is here for symmetry with start().)"""
+        """Clean up resources: close the state DB. (No background threads
+        to stop in the scan-based design.)
+
+        Both callers drop the daemon afterwards, so the connection can
+        go. Leaving it open keeps a handle on `state.db`, which Windows
+        then refuses to let anything delete or replace.
+        """
+        self._state.close()
         log.info("Daemon stopped.")
 
     def stop(self) -> None:

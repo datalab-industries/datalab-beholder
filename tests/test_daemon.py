@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import threading
 import time
 from pathlib import Path
+from typing import Literal
+
+import pytest
 
 from datalab_beholder.config import BeholderConfig
 from datalab_beholder.daemon import BeholderDaemon
@@ -67,6 +71,23 @@ class TestBeholderDaemon:
         config = self._make_config(tmp_path, tmp_tree)
         daemon = self._make_daemon(config, transport, monkeypatch)
         assert daemon._daemon_id == "test-data"
+
+    def test_shutdown_closes_the_state_db(
+        self, tmp_path: Path, tmp_tree: Path, monkeypatch
+    ) -> None:
+        """A leaked SQLite handle is harmless on POSIX (an unlinked file
+        stays readable until closed) but stops Windows deleting or
+        replacing `state.db` — which is what the GUI's stop button and a
+        manual re-sync both need."""
+        transport = MockTransport()
+        config = self._make_config(tmp_path, tmp_tree)
+        daemon = self._make_daemon(config, transport, monkeypatch)
+        daemon.setup()
+
+        daemon.shutdown()
+
+        with pytest.raises(sqlite3.ProgrammingError):
+            daemon._state._conn.execute("SELECT 1")
 
     def test_setup_initialises_timers_without_scanning(
         self, tmp_path: Path, tmp_tree: Path, monkeypatch
@@ -248,6 +269,9 @@ def _attach_config(tmp_path: Path, root: Path) -> BeholderConfig:
     )
 
 
+BlockMode = Literal["per_file", "per_item", "per_item_all_files"]
+
+
 def _multi_file_tree(tmp_path: Path) -> Path:
     """Three files that all belong to item 42."""
     data = tmp_path / "data"
@@ -268,7 +292,7 @@ class TestBlockModesMultiFile:
         self,
         tmp_path: Path,
         monkeypatch,
-        block_mode: str,
+        block_mode: BlockMode,
         new_block: dict | None = None,
     ) -> MockTransport:
         root = _multi_file_tree(tmp_path)
