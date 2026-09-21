@@ -544,14 +544,19 @@ class BeholderDaemon:
                             wp, client, entry, item_cache, unknown_items, synced
                         )
                     except Exception:
-                        # One bad file must not abort the pass: the rest
-                        # still get attached, and whatever already
-                        # uploaded is still marked synced below.
-                        log.exception(
-                            "Failed to attach %s to item %s; will retry next pass",
-                            entry.path,
-                            entry.ids["item_id"],
-                        )
+                        if entry.path in synced:
+                            log.exception(
+                                "Attached %s to item %s, but post-upload processing failed; "
+                                "the upload remains synced",
+                                entry.path,
+                                entry.ids["item_id"],
+                            )
+                        else:
+                            log.exception(
+                                "Failed to attach %s to item %s; will retry next pass",
+                                entry.path,
+                                entry.ids["item_id"],
+                            )
             finally:
                 if synced:
                     self._state.mark_synced(wp.name, synced)
