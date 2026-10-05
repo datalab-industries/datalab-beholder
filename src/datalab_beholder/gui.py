@@ -41,6 +41,7 @@ import yaml
 from datalab_beholder.config import BeholderConfig, load_config, write_config_template
 from datalab_beholder.daemon import BeholderDaemon
 from datalab_beholder.state import Heartbeat, PathSummary, StateStore
+from datalab_beholder.tray import TrayIcon, hide_on_close_default
 
 log = logging.getLogger(__name__)
 
@@ -604,12 +605,30 @@ class BeholderGUI(tk.Tk):
         self._install_log_handler()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # The tray icon is optional (see `tray.py`): without it the window
+        # behaves as it always has, and closing it quits.
+        self._tray = TrayIcon(
+            on_show=lambda: self._from_tray(self._show_window),
+            on_toggle_sync=lambda: self._from_tray(self._toggle_daemon),
+            on_settings=lambda: self._from_tray(self._open_settings),
+            on_quit=lambda: self._from_tray(self._quit),
+            is_syncing=lambda: self._running,
+        )
+        if not self._tray.start():
+            log.debug("Running without a tray icon")
+        self._hide_on_close = hide_on_close_default()
+
         # Observing starts immediately and never stops: the window is useful
         # (and is the point of `--autostart`) even with no local daemon.
         self._observe()
 
         if minimized:
-            self.iconify()
+            # With a tray icon, "minimised" means out of the taskbar
+            # entirely — the icon is how you get the window back.
+            if self._tray.active:
+                self.withdraw()
+            else:
+                self.iconify()
         if autostart:
             # Defer past the first observe so an already-running external
             # daemon is detected before we try to start a competing one.
@@ -1064,6 +1083,7 @@ class BeholderGUI(tk.Tk):
             )
 
         self._update_sync_indicator()
+        self._update_tray()
 
         snap = self._snapshot
         # Prefer the live daemon's own counters when we own it; otherwise
@@ -1170,6 +1190,30 @@ class BeholderGUI(tk.Tk):
 
     # -- Settings dialog ------------------------------------------------------
 
+    def _tray_state(self) -> tuple[str, str]:
+        """Overall health as a tray colour key plus hover text."""
+        presence_text, _ = self._presence.describe()
+        pending = self._snapshot.total_pending
+        detail = f"{presence_text}, {pending} pending"
+
+        if self._n_total and self._n_reachable == 0:
+            return "error", f"beholder — no datalab reachable ({detail})"
+        if self._presence.kind == DaemonPresence.STALE:
+            return "error", f"beholder — daemon may have crashed ({detail})"
+        if not self._running and self._presence.kind == DaemonPresence.NONE:
+            return "idle", f"beholder — not syncing ({detail})"
+        if self._n_total and (
+            self._n_reachable < self._n_total or self._n_authed < self._n_total
+        ):
+            return "warn", f"beholder — degraded connection ({detail})"
+        return "ok", f"beholder — {detail}"
+
+    def _update_tray(self) -> None:
+        if not self._tray.active:
+            return
+        status, tooltip = self._tray_state()
+        self._tray.set_status(status, tooltip)
+
     def _open_settings(self) -> None:
         SettingsDialog(self, self._config_path, self._config)
 
@@ -1197,9 +1241,44 @@ class BeholderGUI(tk.Tk):
 
     # -- Cleanup --------------------------------------------------------------
 
+    def _from_tray(self, action: Callable[[], None]) -> None:
+        """Run a tray menu action on the Tk thread.
+
+        pystray calls back from its own loop thread; Tk and the state DB
+        both belong to this one.
+        """
+        self.after(0, action)
+
+    def _show_window(self) -> None:
+        """Bring the window back from the tray (or from being iconified)."""
+        self.deiconify()
+        self.lift()
+        try:
+            self.focus_force()
+        except tk.TclError:  # pragma: no cover - window manager dependent
+            pass
+
     def _on_close(self) -> None:
+        """Window close button: hide to the tray if there is one.
+
+        Syncing deliberately keeps running — hiding the window of a
+        machine that is meant to be uploading should not stop it. Quit
+        from the tray menu to stop for real.
+
+        Only platforms where the icon is dependable take this path (see
+        `tray.hide_on_close_default`); elsewhere closing still quits.
+        """
+        if self._tray.active and self._hide_on_close:
+            self.withdraw()
+            log.info("Window hidden to the notification area; syncing continues")
+            return
+        self._quit()
+
+    def _quit(self) -> None:
+        """Stop syncing, drop the tray icon, and close the window."""
         if self._running:
             self._stop_daemon()
+        self._tray.stop()
         self._observer.close()
         self.destroy()
 

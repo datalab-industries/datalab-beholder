@@ -182,6 +182,51 @@ For launch-at-login, `--autostart --minimized` starts syncing immediately and
 stays out of the way; if a daemon is already running it monitors that one
 instead of starting a second.
 
+#### Notification area ("system tray")
+
+With the optional `gui` extra installed (`pip install datalab-beholder[gui]`;
+the released binaries bundle it), the window gets an icon in the notification
+area. The icon's colour follows overall health — green when everything is
+connected and syncing, yellow when a *datalab* is unreachable or
+unauthenticated, red when none are or when a daemon has stopped beating, grey
+when nothing is syncing — and its hover text gives the same summary plus the
+pending count. Right-clicking offers Show window, Start/Stop syncing,
+Settings… and Quit.
+
+**On Windows, closing the window hides it to the notification area and syncing
+carries on**; use Quit from the icon's menu to stop for real, and `--minimized`
+starts hidden there rather than in the taskbar. Elsewhere, closing still quits:
+Linux desktops differ too much over whether an icon really appears for it to be
+the only way back to a hidden window. Without the extra, or with no
+notification area available, the window behaves exactly as it always has — the
+reason is logged once at startup.
+
+Set `BEHOLDER_NO_TRAY=1` to turn the icon off and keep window-only behaviour.
+
+macOS has no icon: its backend has to own the main thread, which Tk already
+does.
+
+#### Launching at login on Windows
+
+Not automated — register it by hand, per user:
+
+1. Press `Win+R`, enter `shell:startup`, and the Startup folder opens.
+2. Right-click → New → Shortcut, and point it at the beholder executable.
+3. Open the shortcut's Properties and append the arguments to the target:
+   `datalab-beholder.exe gui --autostart --minimized`, adding
+   `--config C:\path\to\config.yaml` if the config does not sit next to the
+   executable.
+
+The Windows build is a console application whose console is hidden as soon as
+it creates one (PyInstaller's `hide_console`), so launching this way shows no
+console window — while `start`, `status` and `dry-run` still print normally
+into a terminal you run them from. The GUI also writes `beholder.log` next to
+the state database, so a login launch leaves a record.
+
+For an always-on instrument PC that should sync with nobody logged in, prefer
+running `datalab-beholder start` under Task Scheduler ("Run whether user is
+logged on or not") and use the GUI only to watch it.
+
 The **Settings** dialog is tabbed:
 
 | Tab | Covers |

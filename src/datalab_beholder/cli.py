@@ -7,10 +7,48 @@ import logging
 import logging.handlers
 import sys
 from pathlib import Path
+from typing import Any
 
 import click
 
 from datalab_beholder import __version__
+
+
+def _stream_usable(stream: Any) -> bool:
+    """Whether something can actually be written to ``stream``."""
+    if stream is None:
+        return False
+    try:
+        stream.write("")
+        stream.flush()
+    except Exception:
+        return False
+    return True
+
+
+def _redirect_std_streams(logfile: Path) -> bool:
+    """Point unusable `sys.stdout`/`sys.stderr` at ``logfile``.
+
+    A GUI launched from a windowed build has no console at all: in a
+    PyInstaller build the streams can be None, and writing to one then
+    raises — a stray `print`, or a library writing to stderr, should not
+    be able to kill the window.
+
+    Streams that work are left alone, so running `gui` from a terminal
+    still prints there, and the log file does not get each record twice
+    (once from the Rich console handler, once from the file handler).
+    """
+    if _stream_usable(sys.stdout) and _stream_usable(sys.stderr):
+        return False
+    try:
+        stream = open(logfile, "a", encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not _stream_usable(sys.stdout):
+        sys.stdout = stream
+    if not _stream_usable(sys.stderr):
+        sys.stderr = stream
+    return True
 
 
 def _setup_logging(level: str, logfile: Path | None = None) -> None:
@@ -330,7 +368,24 @@ def gui(
             "  macOS:         brew install python-tk"
         )
 
-    _setup_logging(log_level or "INFO")
+    from datalab_beholder.config import load_config
+
+    # A GUI on an instrument PC is exactly the case where a
+    # `beholder.log` is wanted — `start` has always written one, the GUI
+    # never did. Any stdout/stderr that cannot be written to (a windowed
+    # build has no console) is pointed at the same file, so a stray
+    # write can't take the window down.
+    logfile: Path | None = None
+    try:
+        logfile = load_config(config_path).state_db.parent / "beholder.log"
+    except Exception:
+        # A missing or broken config is handled by the window itself,
+        # which offers to write a template; don't fail ahead of it.
+        pass
+
+    if logfile is not None:
+        _redirect_std_streams(logfile)
+    _setup_logging(log_level or "INFO", logfile=logfile)
 
     app = BeholderGUI(config_path, autostart=autostart, minimized=minimized)
     app.mainloop()

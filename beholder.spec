@@ -32,6 +32,14 @@ a = Analysis(
         "watchdog.events",
         "click",
         "sqlite3",
+        # Tray icon (optional extra, bundled in the binary when present).
+        "pystray",
+        "pystray._win32",
+        "pystray._xorg",
+        "pystray._darwin",
+        "PIL",
+        "PIL.Image",
+        "PIL.ImageDraw",
     ],
     hookspath=[],
     hooksconfig={},
@@ -40,7 +48,6 @@ a = Analysis(
         "matplotlib",
         "numpy",
         "bokeh",
-        "PIL",
         "tornado",
     ],
     noarchive=False,
@@ -62,6 +69,11 @@ exe = EXE(
     upx_exclude=[],
     runtime_tmpdir=None,
     console=True,
+    # Console app, so `start`/`status`/`dry-run` still print into a
+    # terminal that launched them — but when the exe creates a console of
+    # its own (double-click, or launch at login) it is hidden straight
+    # away, so `gui` comes up as a windowed app with no console flash.
+    hide_console="hide-early",
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

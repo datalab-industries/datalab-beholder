@@ -40,7 +40,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync
+        run: uv sync --all-extras
 
       - name: Run tests
         run: uv run pytest -v
@@ -83,7 +83,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --python-preference only-system
+        run: uv sync --all-extras --python-preference only-system
 
       - name: Build with PyInstaller
         run: uv run pyinstaller beholder.spec

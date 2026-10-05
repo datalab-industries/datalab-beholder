@@ -3,13 +3,26 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import httpx
 import pytest
 
 from datalab_beholder.client import BeholderClient
+from datalab_beholder import tray
 from datalab_beholder.config import BeholderConfig
+
+
+@pytest.fixture(autouse=True, scope="session")
+def no_tray_icon() -> None:
+    """Keep the GUI tests from docking a real notification-area icon.
+
+    Each window would otherwise start a pystray backend loop against the
+    developer's desktop, which is both antisocial and a source of flaky
+    failures in the Tk tests.
+    """
+    os.environ[tray.NO_TRAY_ENV] = "1"
 
 
 @pytest.fixture

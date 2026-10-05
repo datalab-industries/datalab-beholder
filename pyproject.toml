@@ -13,6 +13,14 @@ dependencies = [
     "rich>=13,<15",
 ]
 
+[project.optional-dependencies]
+# Notification-area ("system tray") icon for the GUI; see tray.py. The
+# GUI runs without these, just without an icon.
+gui = [
+    "pystray ~= 0.19",
+    "pillow >= 10,< 13",
+]
+
 [project.scripts]
 datalab-beholder = "datalab_beholder.cli:main"
 
