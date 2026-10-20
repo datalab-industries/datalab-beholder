@@ -8,8 +8,6 @@
 
 </div>
 
-> ⚠️ **Under construction.** APIs, config shape, and server endpoints are still in flux. Not yet recommended for production deployments.
-
 A daemon that watches instrument directories and attaches matching files to items in one or more [*datalab*](https://github.com/datalab-org/datalab) instances. The daemon extracts a *datalab* `item_id` from each file path with a regex, creates the item on the server if it doesn't already exist, and uploads the file to it — replacing in place if a same-named attachment is already there. Network traffic is outbound only; no inbound firewall rules are needed on the instrument PC.
 
 ## How it works
@@ -19,27 +17,31 @@ The daemon runs a single-threaded `tick()` loop that drives three independent sc
 1. **Cold scan** *(default: every 24 h)* — full directory walk; ground-truth reconciliation against the state DB.
 2. **Warm scan** *(every 1 h)* — directory-mtime-aware walk; discovers new files in active subtrees, skips per-file stats in cold subtrees.
 3. **Hot scan** *(every 60 s)* — re-stats only files modified in the last `hot_window` seconds; cheap and frequent.
-4. **Attach pass** *(every 20 min)* — for every file pending in state with an `item_id` extracted, ensure the *datalab* item exists then upload the file (with `replace_file_id` set if a same-named attachment is already there).
+4. **Attach pass** *(every 20 min)* — for every file pending in state with an `item_id` extracted, ensure the *datalab* item exists then upload the file (with `replace_file_id` set if a same-named attachment is already there), and optionally create a data block for it (see [Creating blocks](#creating-blocks)).
 
 Each tier writes its findings into a local SQLite state DB; the attach pass drains whatever is pending. Cold can be disabled (`cold_interval: null`) for write-once archives.
 
 ## Installation
 
 Either clone this repository and `uv pip install .` (or add to your
-`pyproject.toml`), or use the standalone PyInstaller executable published for
-each release on GitHub for your platform.
+`pyproject.toml`), or download the standalone executable for your platform
+(Linux, macOS or Windows) from the
+[GitHub releases page](https://github.com/datalab-org/datalab-beholder/releases).
+Python 3.10–3.12 is supported.
 
 ## Quick start
 
 Generate a config template:
 
 ```
-datalab-beholder init
+datalab-beholder init --path ./config.yaml
 ```
 
-This writes `~/.datalab-beholder/config.yaml`. Edit it to point at your *datalab* instance and the directories you want to watch:
+Without `--path`, `init` writes `config.yaml` next to the executable (for the standalone binary) or next to the installed package (when run from Python), which is also where every other command looks for it by default. Edit it to point at your *datalab* instance and the directories you want to watch:
 
 ```yaml
+version: 1
+
 datalabs:
   - name: "main"
     url: "https://datalab.example.org"
@@ -66,6 +68,8 @@ sync:
 
 log_level: info
 ```
+
+Relative paths in the config (`watched_paths[].path`, `state_db`) are resolved against the directory containing the config file, not the current working directory. The daemon writes its log to `beholder.log` next to the state DB.
 
 Multiple `datalabs` entries are supported; each `watched_paths[].datalab` field references one by name. API keys are resolved by the underlying *datalab* client, which transparently checks `<PREFIX>_DATALAB_API_KEY` env vars (where `<PREFIX>` matches the deployment's identifier prefix) when no literal key is provided.
 
@@ -97,6 +101,57 @@ The state DB records each watched path's `id_patterns`, `item_id_template` and `
 
 Run `datalab-beholder dry-run` after editing the patterns to preview exactly what the reset will do; `status` also flags a pending reset.
 
+### Creating blocks
+
+`block_patterns` maps glob patterns (matched against the file's basename) to a *datalab* block type. After a matching file is attached, the daemon creates a block of that type on the item and wires it to the file; patterns are tried in order and the first match wins.
+
+```yaml
+    block_patterns:
+      "*.mpr": "cycle"
+      "*.nda": "cycle"
+    block_mode: "per_file"
+```
+
+`block_mode` controls how many blocks of each type an item gets:
+
+- `per_file` *(default)* — one block per attached file.
+- `per_item` — at most one block of each type per item; later files are attached without adding more blocks.
+- `per_item_all_files` — one block per type, with every matching file wired into it.
+
+Existing blocks are recognised, so wiping the state DB does not create duplicates. See [`tests/examples/block-modes`](tests/examples/block-modes) for a runnable side-by-side comparison of the three modes.
+
+### Attaching to other users' items
+
+By default beholder can only see items its API key's own account owns or has been shared on, so a file whose `item_id` belongs to someone else is skipped.
+
+Setting `elevate_permissions: true` on a *datalab* entry makes the daemon send *datalab*'s admin super-user flag (`?sudo=1`) on its reads, so it can look up and attach to any item on the instance:
+
+```yaml
+datalabs:
+  - name: "main"
+    url: "https://datalab.example.org"
+    api_key: "an-admin-users-api-key"
+    elevate_permissions: true
+```
+
+This requires the configured key to belong to an **admin** account.
+For a normal user the flag is ignored server-side and nothing changes.
+Writes are unaffected: *datalab* already grants admins full write access without an opt-in, so the flag is only ever sent on GETs.
+
+Two caveats:
+
+- Uploaded files are recorded with the *admin's* account as their creator, not
+  the item owner's. The owner still sees, downloads and can delete the file
+  (file access is inherited from the item), but the provenance reads as though
+  the admin attached it.
+- This only covers attaching to items that **already exist**. If beholder falls
+  back to creating an item, that item is owned by the admin account and the
+  intended user will not see it — so pair this with `group_id`/`collection_id`
+  capture groups, pre-create the items or disable auto-creation (via `item_type: null`) to avoid that.
+
+Longer term this is intended to be replaced by instrument-scoped API keys
+issued by an admin, rather than borrowing a human admin's key.
+
 ### Running
 
 `start` is the default command, so the bare invocation runs the daemon:
@@ -117,7 +172,7 @@ datalab-beholder --config /path/to/config.yaml
 
 ### `datalab-beholder init`
 
-Creates a config template at `~/.datalab-beholder/config.yaml` (or at `--path`).
+Creates a config template at `config.yaml` next to the package/executable (or at `--path`). This overwrites any existing file at that location.
 
 ```
 datalab-beholder init --path ./my-config.yaml
@@ -165,18 +220,10 @@ The JSON includes each entry's resolved `ids` dict (capture groups + templated `
 
 ### `datalab-beholder status`
 
-Shows the current state database and recent sync history.
+Shows, per watched path, whether the path exists, the last sync time, the number of pending changes, and whether a state reset is pending because the id settings changed.
 
 ```
 datalab-beholder status [--config PATH]
-```
-
-### `datalab-beholder gui`
-
-Launches a small Tkinter status GUI showing connection state per configured *datalab*, recent activity, and a settings editor for the YAML config. Driven by the same `tick()` loop as the CLI daemon.
-
-```
-datalab-beholder gui [--config PATH]
 ```
 
 ## Standalone executable (PyInstaller)
@@ -187,7 +234,7 @@ For deployment onto instrument PCs without a Python install, a single-file execu
 uv run pyinstaller beholder.spec
 ```
 
-The resulting binary in `dist/` launches the GUI and reads `config.yaml` from the directory next to the executable. Pre-built Windows binaries are produced by the project's CI workflow.
+The resulting binary in `dist/` is the same CLI described above (running it with no arguments starts the daemon) and reads `config.yaml`, and keeps `state.db` and `beholder.log`, in the directory next to the executable. Linux, macOS and Windows binaries are attached to each tagged release by the project's CI workflow.
 
 PyInstaller does not cross-compile — a Windows binary must be built on Windows. To build binaries for an arbitrary commit without tagging a release, trigger the CI workflow manually (Actions → CI → *Run workflow*, or `gh workflow run ci.yml --ref main -f ref=<sha>`); manual runs upload the Linux/Windows/macOS binaries as downloadable workflow artifacts.
 
@@ -195,11 +242,13 @@ PyInstaller does not cross-compile — a Windows binary must be built on Windows
 
 | Section | Field | Default | Description |
 |---------|-------|---------|-------------|
+| | `version` | `1` | Config schema version; older configs are migrated forward on load |
 | `datalabs[]` | `name` | *(required)* | Unique label referenced by `watched_paths[].datalab` |
 | `datalabs[]` | `url` | *(required)* | URL of the *datalab* instance |
 | `datalabs[]` | `api_key` | *(optional)* | API key; if omitted, resolved from env by the *datalab* client |
 | `datalabs[]` | `elevate_permissions` | `false` | Admin keys only: read other users' items in *datalab*'s super-user mode |
-| `watched_paths[]` | `path` | *(required)* | Directory to watch |
+| `watched_paths[]` | `kind` | `local` | Source type; only `local` is implemented (see [Roadmap](#roadmap)) |
+| `watched_paths[]` | `path` | *(required)* | Directory to watch; relative paths resolve against the config file's directory |
 | `watched_paths[]` | `name` | *(required)* | Label shown in the *datalab* UI |
 | `watched_paths[]` | `datalab` | *(required if >1 datalab)* | Name of the *datalab* instance to push to |
 | `watched_paths[]` | `include_patterns` | `["*"]` | Glob patterns for files to include |
@@ -208,6 +257,8 @@ PyInstaller does not cross-compile — a Windows binary must be built on Windows
 | `watched_paths[]` | `item_id_template` | `null` | `str.format` template, e.g. `"{group_id}-{item_id}"` |
 | `watched_paths[]` | `collection_id_template` | `null` | `str.format` template for the collection id |
 | `watched_paths[]` | `item_type` | `null` | *datalab* item type; required to auto-create missing items |
+| `watched_paths[]` | `block_patterns` | `{}` | Glob → *datalab* block type; creates a block after attaching a matching file |
+| `watched_paths[]` | `block_mode` | `per_file` | `per_file`, `per_item` or `per_item_all_files` (see [Creating blocks](#creating-blocks)) |
 | `watched_paths[]` | `max_depth` | `10` | Max directory traversal depth |
 | `watched_paths[]` | `scan.hot_interval` | `60` | Seconds between hot scans (recently-modified file re-stat) |
 | `watched_paths[]` | `scan.warm_interval` | `3600` | Seconds between warm scans (directory-mtime walk) |
@@ -227,6 +278,7 @@ The 0.1.x version ships only the **direct-attach** mode described above. A secon
 Other things on the list:
 
 - **SSH and cloud-storage watched paths.** The config schema already discriminates on `kind` (`local` / `ssh` / `cloud`); only `local` is implemented today.
+- **A desktop GUI.** An experimental Tkinter status window (connection state per configured *datalab*, recent activity, start/stop controls, driven by the same `tick()` loop as the CLI daemon) exists in the codebase but is disabled in 0.1.x. Its settings editor only covers datalab connections and watched-path names/locations, and saving from it rewrites the config without the other settings (id patterns, templates, block patterns, scan cadence, etc.); it will return as a `gui` command once that is fixed.
 
 Issues and design discussion welcome — file them at [github.com/datalab-org/datalab-beholder/issues](https://github.com/datalab-org/datalab-beholder/issues).
 
@@ -240,35 +292,3 @@ uv run pytest -v
 ```
 
 See [DESIGN.md](DESIGN.md) for the original design notes and motivation.
-
-### Attaching to other users' items
-
-By default beholder can only see items its API key's own account owns or has been shared on, so a file whose `item_id` belongs to someone else is skipped.
-
-Setting `elevate_permissions: true` on a *datalab* entry makes the daemon send *datalab*'s admin super-user flag (`?sudo=1`) on its reads, so it can look up and attach to any item on the instance:
-
-```yaml
-datalabs:
-  - name: "main"
-    url: "https://datalab.example.org"
-    api_key: "an-admin-users-api-key"
-    elevate_permissions: true
-```
-
-This requires the configured key to belong to an **admin** account.
-For a normal user the flag is ignored server-side and nothing changes.
-Writes are unaffected: *datalab* already grants admins full write access without an opt-in, so the flag is only ever sent on GETs.
-
-Two caveats:
-
-- Uploaded files are recorded with the *admin's* account as their creator, not
-  the item owner's. The owner still sees, downloads and can delete the file
-  (file access is inherited from the item), but the provenance reads as though
-  the admin attached it.
-- This only covers attaching to items that **already exist**. If beholder falls
-  back to creating an item, that item is owned by the admin account and the
-  intended user will not see it — so pair this with `group_id`/`collection_id`
-  capture groups, pre-create the items or disable auto-creation (via `item_type: null`) to avoid that.
-
-Longer term this is intended to be replaced by instrument-scoped API keys
-issued by an admin, rather than borrowing a human admin's key.

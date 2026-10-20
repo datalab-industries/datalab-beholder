@@ -296,7 +296,14 @@ def dry_run(config_path: Path | None, log_level: str | None) -> None:
     help="Override log level from config.",
 )
 def gui(config_path: Path | None, log_level: str | None) -> None:
-    """Launch the beholder GUI."""
+    """Launch the beholder GUI (disabled in 0.1.x)."""
+    # Disabled for 0.1.x: the settings dialog drops most of the config on
+    # save. Remove this raise to re-enable the GUI.
+    raise click.ClickException(
+        "The GUI is not available in this release; it will return in a future "
+        "version. Use `datalab-beholder start` to run the daemon."
+    )
+
     try:
         from datalab_beholder.gui import BeholderGUI
     except ImportError:
